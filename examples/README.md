@@ -14,6 +14,7 @@
 | `devices/efr32mg21_brd4181a.yaml` | An EFR32MG21 on the BRD4181A radio board: LED0 on PB0, BTN0 on PD2, RTT. |
 | `efr32mg21_zigbee.yaml` | The board with the zigbee-rs sensor image on one medium with the TLSR8258 sampleGW coordinator: the EFR32 joins, completes the TCLK exchange and reports. The radio is not the silicon's (`docs/efr32mg21.md`). |
 | `nrf52840_zigbee.yaml` | The same board with the SHT31 image on one radio medium with the TLSR8258 sampleGW coordinator: the nRF52840 joins the network, completes the TCLK exchange and reports temperature and humidity read from a simulated SHT31 on P0.26/P0.27. Different chips and cores in one world. |
+| `cc2530_zigbee.yaml` | A CC2530F256 with the standard Z-Stack DIYRuZ Motion Router image on one medium with the TLSR8258 sampleGW coordinator: the router joins, gets the network key, announces itself and exchanges link status. It is powered on after the coordinator has formed its network (the image scans once and does not rescan). |
 | `parts/shtc3.lua`, `parts/sht4x.lua`, `parts/lcd_lywsd03mmc.lua` | The two sensors and the I2C segment display of the LYWSD03MMC. |
 | `parts/bl0937.lua` | The BL0937 as a scripted part (CF / CF1 pulse outputs, SEL input). |
 | `parts/ds18b20.lua`, `parts/sht3x.lua` | Reference sensor scripts (see `docs/scripting.md`). |
@@ -56,6 +57,7 @@ No firmware image is stored in the repository. Put the images where the
 | plug | `tlsr8258-plug.bin` from `zigbee-rs-plugs` (`build-tuya.sh`, 512 KiB board) | `firmware/tlsr8258-plug.bin` |
 | nRF52840 board | `nrf52840-sensor.bin`, the Embassy Zigbee sensor image of `zigbee-rs` (built for the nRF52840-DK; the CI artifact `nrf52840-sensor-firmware`) | `firmware/nrf52840-sensor.bin` |
 | EFR32MG21 board | `efr32mg21-sensor.bin` of `zigbee-rs` (BRD4181A; the CI artifact `efr32mg21-sensor-firmware`) | `firmware/efr32mg21-sensor.bin` (used by `efr32mg21_zigbee.yaml`) |
+| CC2530 Z-Stack router | `DIYRuZ_Motion_Router.hex` 0.0.5 from the `koptserg/motion` releases | `firmware/DIYRuZ_Motion_Router.hex` (used by `cc2530_zigbee.yaml`) |
 | nRF52840 board with SHT31 | the `sensor-sht31` variant of the same image (CI artifact `nrf52840-sensor-sht31-firmware`) | `firmware/nrf52840-sensor-sht31.bin` (used by `nrf52840_zigbee.yaml`) |
 
 The plug's pins and BL0937 ratios default to the Zbeacon TS011F board (relay

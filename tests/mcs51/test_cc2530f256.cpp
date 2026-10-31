@@ -635,7 +635,7 @@ void test_clock_and_status_registers() {
     CHECK(device.read_idata(0x40) == 0x80);
     CHECK(device.read_idata(0x41) == 0xc9);
     CHECK(device.read_idata(0x42) == 0xc9);
-    CHECK(device.read_idata(0x43) == 0x00);
+    CHECK(device.read_idata(0x43) == 0x60); // only XOSC_STB and HFRC_STB are set
     CHECK(device.read_idata(0x44) == 0x07);
     CHECK(device.diagnostics().read_only_sfr_writes == 2);
 }

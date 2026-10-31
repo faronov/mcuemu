@@ -1,0 +1,43 @@
+# A CC2530F256 running the standard Z-Stack DIYRuZ Motion Router image joins the
+# network of the TLSR8258 sampleGW coordinator: two chips with different cores
+# on one radio medium.
+#
+#   mkdir -p /tmp/cc && cd /tmp/cc
+#   /path/to/build/mcuemu sim /path/to/examples/cc2530_zigbee.yaml --for 30s
+#
+# The image is the DIYRuZ_Motion_Router.hex release 0.0.5 of koptserg/motion;
+# put it in firmware/ (see examples/README.md). `cc-air.pcap` opens in Wireshark
+# (802.15.4 without FCS).
+version: 1
+
+world:
+  seed: 1
+  duration: 30s
+  radio:
+    - id: air0
+      model: log_distance
+      reference_loss_db: 40
+      path_loss_exponent: 2.5
+
+devices:
+  - id: coordinator
+    mcus:
+      - id: zb
+        model: tlsr8258
+        variant: F1K
+        firmware: ../firmware/samplegw_tb03f.bin
+        radio: { air: air0, position: [0, 0, 1], tx_power_dbm: 10, protocols: [zigbee] }
+
+  - id: router
+    mcus:
+      - id: zr
+        model: cc2530f256
+        firmware: ../firmware/DIYRuZ_Motion_Router.hex
+        # The image scans all channels once, about 2.5 s after power-on, and
+        # does not rescan by itself. The coordinator needs ~5 s to form its
+        # network, so power the router on after that.
+        start_at: 12s
+        radio: { air: air0, position: [4, 0, 1], tx_power_dbm: 4, protocols: [zigbee] }
+
+attach:
+  - { endpoint: air0, sink: "pcap:cc-air.pcap" }

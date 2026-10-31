@@ -767,6 +767,19 @@ void test_xosc_stop_without_detector() {
     CHECK_EQ(d.diagnostics().clock_stall_cycles, reset - stop);
 }
 
+// SLEEPSTA bit 6 (XOSC_STB) and bit 5 (HFRC_STB) are the oscillator-stable flags
+// the standard Z-Stack HAL polls after `SLEEPCMD &= ~OSC_PD` (inferred, see
+// Cc2530F256::sleepsta_value). A stopped oscillator clears its flag.
+void test_sleepsta_oscillator_stable() {
+    Program p;
+    Cc2530F256 d;
+    load(d, p.flash);
+    CHECK_EQ(d.read_sfr(SLEEPSTA) & 0x60, 0x60);
+    d.stop_oscillator(Cc2530Oscillator::Xosc32M, 100);
+    run_until(d, 200);
+    CHECK_EQ(d.read_sfr(SLEEPSTA) & 0x60, 0x20);
+}
+
 // A switch to an already stopped XOSC never completes (4.4.2); with the
 // detector enabled, monitoring of the new selection starts at the CLKCONCMD
 // write and the reset follows the time-out later. The program waits in Idle
@@ -970,6 +983,7 @@ int main() {
     test_clock_loss_xosc();
     test_clock_loss_32k();
     test_xosc_stop_without_detector();
+    test_sleepsta_oscillator_stable();
     test_switch_to_stopped_xosc();
     test_power_cut_keeps_stopped_oscillator();
     test_clock_loss_suspended_in_pm1_pm2();

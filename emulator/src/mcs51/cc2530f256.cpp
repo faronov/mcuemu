@@ -868,6 +868,17 @@ std::uint8_t Cc2530F256::sleepsta_value() const {
     value |= static_cast<std::uint8_t>(half_periods & 1u);
     if (sfr_[SfrClkconsta] & 0x80u)
         value |= sfr_[SfrSleepcmd] & 0x80u;
+    // XOSC_STB (bit 6) and HFRC_STB (bit 5): the oscillator-stable flags of the
+    // CC2430-era SLEEP register. SWRU191F no longer lists them, but the standard
+    // Z-Stack HAL still polls bit 6 after powering the oscillators
+    // (`SLEEPCMD &= ~OSC_PD; while (!(SLEEPSTA & XOSC_STB))`) and runs on
+    // CC2530 silicon. Inferred: an oscillator is stable unless a test or the
+    // host stopped it; the start-up time is not modelled (as for CLKCONSTA).
+    const std::uint64_t now = engine_cycles();
+    if (!oscillator_stopped(Cc2530Oscillator::Xosc32M, now))
+        value |= 0x40u;
+    if (!oscillator_stopped(Cc2530Oscillator::Rcosc16M, now))
+        value |= 0x20u;
     return value;
 }
 
