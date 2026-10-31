@@ -117,6 +117,15 @@ Cc2530F256Mcu::Cc2530F256Mcu(std::string name, std::uint32_t clock_hz)
         if (Pin *wired = pins_[port * 8 + pin])
             wired->set_drive(to_drive(drive), cycle_ns(cycle));
     });
+    // A power-on reset (also a power cut inside a run) restarts the debugger
+    // arrival count and re-arms its breakpoint, as reset() does.
+    device_.set_reset_listener([this](mcs51emu::Cc2530ResetCause cause) {
+        if (cause != mcs51emu::Cc2530ResetCause::PowerOn)
+            return;
+        debugger_arrivals_ = 0;
+        debugger_at_break_ = false;
+        device_.set_breakpoint(debugger_pc_);
+    });
 }
 
 std::uint64_t Cc2530F256Mcu::cycle_ns(std::uint64_t cycle) const {

@@ -110,7 +110,9 @@ counted from power-on (also when a run quantum ends exactly there). On arrival
 N the writes with `hit: N` (default 1) are stored to XDATA SRAM
 (`0x0000`-`0x1fff`) in list order before the instruction at `pc` executes. No
 virtual time passes for a halt. After the last arrival that has writes (or is
-reported, below) the breakpoint is removed and the firmware runs free. `hex`
+reported, below) the breakpoint is removed and the firmware runs free. A power-on
+reset, also a power cut inside a run, restarts the arrival count and re-arms
+the breakpoint, so the writes are delivered again. `hex`
 may contain spaces or `_`. Other models reject `debugger`. This is a test
 harness input, not a modelled peripheral: anything a run proves with it
 depends on the written data. The chip's real two-wire debug interface is

@@ -446,6 +446,20 @@ void test_cc2530_debugger_writes() {
         CHECK(mcu.debugger_arrivals() == 200 && idata(mcu, 0x31) == 2);
     }
     {
+        // A power cut inside a run (breakpoint already removed) restarts
+        // the count: every write is delivered again to the cleared SRAM.
+        Cc2530F256Mcu mcu("dbg");
+        mcu.load_firmware(mailbox_image());
+        mcu.set_debugger(0x0046, writes);
+        mcu.run_until(100000);
+        CHECK(mcu.debugger_arrivals() == 200);
+        mcu.device().schedule_power_cut(mcu.device().registers().cycles + 100);
+        mcu.run_until(300000);
+        CHECK(mcu.device().diagnostics().power_cuts == 1);
+        CHECK(mcu.debugger_arrivals() == 200 && idata(mcu, 0x31) == 2);
+        CHECK(xdata(mcu, 0x0300) == 0xee);
+    }
+    {
         Cc2530F256Mcu mcu("dbg");
         CHECK(throws_invalid([&] { mcu.set_debugger(0x0046, {}); }));
         CHECK(throws_invalid([&] { mcu.set_debugger(0x0046, {{0, 0x0100, {1}}}); }));

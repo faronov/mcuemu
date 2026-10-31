@@ -788,6 +788,8 @@ void Cc2530F256::reset_core(Cc2530ResetCause cause, bool count) {
     for (const auto &peripheral : peripherals_)
         peripheral->reset(cause);
     update_interrupts();
+    if (reset_listener_)
+        reset_listener_(cause);
 }
 
 void Cc2530F256::install_code_view() {

@@ -361,6 +361,11 @@ public:
     void set_breakpoint(std::optional<std::uint16_t> logical_pc) noexcept {
         breakpoint_ = logical_pc;
     }
+    // Called at the end of every chip reset (power-on, power cut, external,
+    // watchdog, clock loss), also inside run(), with the cause.
+    void set_reset_listener(std::function<void(Cc2530ResetCause)> listener) {
+        reset_listener_ = std::move(listener);
+    }
 
     // ---- RESET_N and the two-wire debug interface (SWRU191F Chapter 3) ----
     // Not related to set_breakpoint() above, which is the emulator's own
@@ -698,6 +703,7 @@ private:
     std::uint64_t event_sequence_{};
     std::optional<std::uint16_t> breakpoint_;
     bool break_hit_{};
+    std::function<void(Cc2530ResetCause)> reset_listener_;
     std::uint64_t hook_calls_{};
     std::uint64_t trace_cycle_limit_{UINT64_MAX};
     bool sleep_requested_{};
