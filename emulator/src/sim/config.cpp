@@ -541,7 +541,7 @@ FlashConfig parse_flash(const YAML::Node &node, const std::string &base_dir) {
 McuConfig parse_mcu(const YAML::Node &node, const std::string &base_dir) {
     require_map(node, "mcu");
     check_keys(node, "mcu",
-               {"id", "model", "variant", "firmware", "cpu2_firmware", "efuse", "rom", "boot_from_rom", "rf_calibration", "clock_hz", "supply_mv",
+               {"id", "model", "variant", "firmware", "cpu2_firmware", "cpu2_model", "efuse", "rom", "boot_from_rom", "rf_calibration", "clock_hz", "supply_mv",
                 "start_at", "radio", "rtt", "flash_timing", "eui64",
                 "tick_start_settle", "tick_start_jitter", "tick_start_seed", "debugger", "flash"});
     McuConfig mcu;
@@ -629,6 +629,15 @@ McuConfig parse_mcu(const YAML::Node &node, const std::string &base_dir) {
         }
         if (mcu.cpu2_images.empty())
             fail(cpu2_firmware, "'cpu2_firmware' lists no images");
+    }
+    if (const YAML::Node cpu2_model = node["cpu2_model"]) {
+        if (mcu.model != "stm32wb55")
+            fail(cpu2_model, "'cpu2_model' is only supported by stm32wb55");
+        mcu.cpu2_model = scalar(cpu2_model, "'cpu2_model'");
+        if (*mcu.cpu2_model != "thread_rcp" && *mcu.cpu2_model != "st_mac_802154")
+            fail(cpu2_model, "'cpu2_model' must be thread_rcp or st_mac_802154");
+        if (!mcu.cpu2_images.empty())
+            fail(cpu2_model, "'cpu2_model' selects a built-in CPU2 model; remove 'cpu2_firmware'");
     }
     if (const YAML::Node efuse = node["efuse"]) {
         if (mcu.model != "phy6252")

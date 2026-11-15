@@ -111,7 +111,7 @@ target_include_directories(cortexm PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/emulator/i
 target_compile_options(cortexm PRIVATE ${MCUEMU_WARNING_FLAGS})
 target_link_libraries(cortexm PUBLIC unicorn)
 
-add_library(stm32wb55emu emulator/src/stm32wb55/stm32wb55.cpp)
+add_library(stm32wb55emu emulator/src/stm32wb55/stm32wb55.cpp emulator/src/stm32wb55/st_mac.cpp)
 target_include_directories(stm32wb55emu PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/emulator/include)
 target_compile_options(stm32wb55emu PRIVATE ${MCUEMU_WARNING_FLAGS})
 target_link_libraries(stm32wb55emu PUBLIC cortexm mcuemu-core)
@@ -360,6 +360,10 @@ if(MCUEMU_BUILD_TESTS)
     target_include_directories(bl702emu-tests PRIVATE tests/bl702)
     target_link_libraries(bl702emu-tests PRIVATE bl702emu)
     add_test(NAME bl702emu-tests COMMAND bl702emu-tests)
+
+    add_executable(stm32wb55emu-tests tests/stm32wb55/test_st_mac.cpp)
+    target_link_libraries(stm32wb55emu-tests PRIVATE stm32wb55emu)
+    add_test(NAME stm32wb55emu-tests COMMAND stm32wb55emu-tests)
 
     add_executable(efr32emu-tests
         tests/efr32/test_main.cpp
@@ -663,6 +667,33 @@ if(MCUEMU_BUILD_TESTS)
                 LABELS "firmware;zigbee"
             )
         endif()
+    endif()
+
+    # zigbee-rs Nucleo-WB55 router (CPU1 image) on the built-in ST 802.15.4 MAC
+    # model of CPU2 joins the TLSR8258 sampleGW (docs/stm32wb55.md).
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/firmware/stm32wb55-zigbee-rs-router.bin" AND
+       EXISTS "${MCUEMU_SAMPLE_GW_FIRMWARE}")
+        find_package(Python3 COMPONENTS Interpreter QUIET)
+        if(Python3_Interpreter_FOUND)
+            add_test(
+                NAME firmware_stm32wb55_zigbee_rs_router_join
+                COMMAND "${Python3_EXECUTABLE}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/tests/firmware/zigbee_air_check.py"
+                        "$<TARGET_FILE:mcuemu>"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/examples/stm32wb55_zigbee_rs_router.yaml"
+                        --workdir "${CMAKE_CURRENT_BINARY_DIR}/stm32wb55-zigbee-rs-router"
+                        --pcap stm32wb55-zigbee-rs-air.pcap
+                        --for 30s --no-uart-trace --min-up 2 --min-unicast 1 --min-down 2
+                        --expect "Joined network as 0x[0-9A-F]{4}"
+                        --expect "online: addr=0x[0-9A-F]{4} ch=[0-9]+ pan=0x[0-9A-F]{4}")
+            set_tests_properties(firmware_stm32wb55_zigbee_rs_router_join PROPERTIES
+                TIMEOUT 600
+                LABELS "firmware;zigbee"
+            )
+        endif()
+    else()
+        message(STATUS
+            "Skipping firmware_stm32wb55_zigbee_rs_router_join: firmware/stm32wb55-zigbee-rs-router.bin or the sampleGW not found")
     endif()
 
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/firmware/samplesw_8269.bin" AND

@@ -1,5 +1,6 @@
 #include "sim/stm32wb55_mcu.hpp"
 
+#include <cstdlib>
 #include <fstream>
 #include <iterator>
 #include <stdexcept>
@@ -18,6 +19,9 @@ std::uint64_t stable_id(std::string_view name) {
 
 Stm32wb55Mcu::Stm32wb55Mcu(std::string name) : Mcu(std::move(name)) {
     chip_.set_device_id(stable_id(this->name()));
+    // MCUEMU_STM32WB_TRACE=1 prints the primitives of the built-in MAC model.
+    if (const char *trace = std::getenv("MCUEMU_STM32WB_TRACE"); trace && *trace && *trace != '0')
+        chip_.set_cpu2_trace(this->name());
 }
 
 void Stm32wb55Mcu::load_firmware(const std::string &path) {

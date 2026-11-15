@@ -1,8 +1,12 @@
 #include "stm32wb55emu/stm32wb55.hpp"
 
+#include "stm32wb55emu/st_mac.hpp"
+
 #include <algorithm>
 #include <array>
+#include <cstdio>
 #include <cstring>
+#include <iostream>
 #include <limits>
 #include <stdexcept>
 
@@ -37,6 +41,23 @@ constexpr std::uint64_t RngReadyTimeNs = 1000; // modeled 64 cycles at the 64 MH
 constexpr std::uint64_t Never = std::numeric_limits<std::uint64_t>::max();
 constexpr std::uint32_t RadioPollCycles = 1280; // 20 us at 64 MHz.
 constexpr std::uint64_t RadioAckTurnaroundNs = 192000; // 12 symbols at 2.4 GHz.
+constexpr std::uint32_t Tim2Base = 0x40000000;
+constexpr std::uint32_t Tim2Irq = 28;
+constexpr std::uint32_t Dma1Base = 0x40020000;
+constexpr std::uint32_t Dma1Channel1Irq = 11; // DMA1_Channel1..7 are IRQs 11..17.
+constexpr std::uint32_t Usart1Tdr = 0x40013828;
+// RM0434 37.2: UID64 (UDN, then device id and ST company id) used as EUI-64.
+constexpr std::uint32_t Uid64Address = 0x1fff7580;
+// AN5289 4.3: CPU2 reports its ready event once its firmware is up; CPU1
+// must have finished TL_Init/shci_init/TL_MM_Init by then. The delay is a
+// model choice (no datasheet figure), long enough for those few stores.
+constexpr std::uint64_t StMacBootNs = 5000000;
+constexpr std::uint64_t StMacBootRetryNs = 1000000;
+// SRAM2b top: CPU2-owned memory where the MAC model places the MSDU,
+// beacon payload or PIB value a notification points to.
+constexpr std::uint32_t StMacDataAddress = 0x2003fc00;
+constexpr unsigned MacTableIndex = 6;      // TL_RefTable.p_mac_802_15_4_table
+constexpr unsigned MacOpcodeOffset = 0x280; // MAC_802_15_4_CMD_OPCODE_OFFSET
 
 std::uint16_t get16(const std::uint8_t *p) {
     return static_cast<std::uint16_t>(p[0] | (static_cast<std::uint16_t>(p[1]) << 8));
@@ -89,6 +110,38 @@ std::uint16_t hdlc_fcs(const std::uint8_t *data, std::size_t size) {
 
 } // namespace
 
+class Stm32wb55::MacHost final : public StMacHost {
+public:
+    explicit MacHost(Stm32wb55 &chip) : chip_(chip) {}
+    bool read(std::uint32_t address, void *out, std::size_t size) override {
+        if (address >= FlashBase && address <= FlashBase + FlashSize &&
+            size <= FlashBase + FlashSize - address) {
+            std::memcpy(out, chip_.flash_ + (address - FlashBase), size);
+            return true;
+        }
+        return chip_.memory_read(address, out, size);
+    }
+    std::uint64_t transmit(std::uint8_t channel, std::uint64_t start_ns,
+                           const std::vector<std::uint8_t> &mpdu) override {
+        if (!chip_.air_ || chip_.radio_node_.empty())
+            return 0;
+        chip_.air_->transmit(chip_.radio_node_, {}, mcuemu::RadioProtocol::Zigbee802154,
+                             channel, start_ns, mpdu);
+        return chip_.air_->frames().back().end_ns;
+    }
+    bool channel_busy(std::uint8_t channel, std::uint64_t at_ns) override {
+        if (!chip_.air_ || chip_.radio_node_.empty())
+            return false;
+        return !chip_.air_
+                    ->in_flight(chip_.radio_node_, mcuemu::RadioProtocol::Zigbee802154, channel,
+                                at_ns, 0)
+                    .empty();
+    }
+
+private:
+    Stm32wb55 &chip_;
+};
+
 class Stm32wb55::Cpu2Bus final : public cortexm::Bus {
 public:
     explicit Cpu2Bus(Stm32wb55 &chip) : chip_(chip) {}
@@ -122,6 +175,7 @@ Stm32wb55::Stm32wb55() {
     cpu2_core_->map_memory_alias(RamBase, RamSize, true, ram_);
     cpu2_core_->map_memory_alias(SystemMemoryBase, SystemMemorySize, false, system_memory_);
     cpu2_bus_ = std::make_unique<Cpu2Bus>(*this);
+    mac_host_ = std::make_unique<MacHost>(*this);
     std::memset(flash_, 0xff, FlashSize);
     std::memset(ram_, 0, RamSize);
     std::memset(system_memory_, 0xff, SystemMemorySize);
@@ -144,6 +198,7 @@ Stm32wb55::Stm32wb55() {
     system_memory_[Cpu2ModelCode - SystemMemoryBase + 2] = 0xfe; // B .
     system_memory_[Cpu2ModelCode - SystemMemoryBase + 3] = 0xe7;
     registers_[FlashControlBase + 0x3c] = 0; // SRAM2A starts at 0x20030000.
+    registers_[FlashControlBase + 0x14] = 0xc0000000u; // FLASH_CR: LOCK, OPTLOCK
     registers_[RccBase] = (1u << 1) | (1u << 10) | (1u << 17) | (1u << 25);
     registers_[RccBase + 0x98] = 1u << 1; // LSE ready.
     ipcc_c1mr_ = 0xffffffffu;
@@ -242,6 +297,9 @@ void Stm32wb55::set_device_id(std::uint64_t id) {
     put32(system_memory_ + (0x1fff7590u - SystemMemoryBase), static_cast<std::uint32_t>(id));
     put32(system_memory_ + (0x1fff7594u - SystemMemoryBase), static_cast<std::uint32_t>(id >> 32));
     put32(system_memory_ + (0x1fff7598u - SystemMemoryBase), 0x00cafe55u);
+    put32(system_memory_ + (Uid64Address - SystemMemoryBase), static_cast<std::uint32_t>(id));
+    put32(system_memory_ + (Uid64Address + 4 - SystemMemoryBase),
+          static_cast<std::uint32_t>(id >> 32));
     rng_state_ = static_cast<std::uint32_t>(id) ^ static_cast<std::uint32_t>(id >> 32) ^
                  0x9e3779b9u;
     if (rng_state_ == 0)
@@ -317,6 +375,7 @@ void Stm32wb55::reset() {
     rng_data_ready_ = false;
     registers_.clear();
     registers_[FlashControlBase + 0x3c] = 0;
+    registers_[FlashControlBase + 0x14] = 0xc0000000u;
     registers_[RccBase] = (1u << 1) | (1u << 10) | (1u << 17) | (1u << 25);
     registers_[RccBase + 0x98] = 1u << 1;
     rx_notification_outstanding_ = false;
@@ -340,7 +399,25 @@ void Stm32wb55::reset() {
     pending_response_ns_ = 0;
     radio_poll_ns_ = 0;
     last_rx_ns_ = 0;
+    cpu2_model_boot_due_ns_ = 0;
+    mac_notification_outstanding_ = false;
+    st_mac_.reset();
+    dma1_ = {};
+    dma1_isr_ = 0;
+    tim2_cr1_ = 0;
+    tim2_dier_ = 0;
+    tim2_sr_ = 0;
+    tim2_psc_ = 0;
+    tim2_psc_active_ = 0;
+    tim2_arr_ = 0xffffffffu;
+    tim2_ccr_ = {};
+    tim2_epoch_cycle_ = core_->cycles();
+    tim2_epoch_count_ = 0;
     core_->reset(FlashBase + vector_table_offset_);
+}
+
+void Stm32wb55::set_cpu2_model(Cpu2Model model) {
+    cpu2_model_kind_ = model;
 }
 
 void Stm32wb55::connect_radio(mcuemu::VirtualAir &air, const std::string &node) {
@@ -420,6 +497,12 @@ std::uint32_t Stm32wb55::read_mmio(std::uint32_t address, unsigned size) {
         }
         return lane_read(value, address, size);
     }
+    if (address >= Tim2Base && address < Tim2Base + 0x400) {
+        tim2_advance(core_->cycles());
+        return lane_read(tim2_read(address & 0x3fcu), address, size);
+    }
+    if (address >= Dma1Base && address < Dma1Base + 0x400)
+        return lane_read(dma_read(address & ~3u), address, size);
     if (address >= LptimBase && address < LptimBase + 0x400) {
         const std::uint64_t now_ns = core_time_ns(bus_core);
         lptim_advance(now_ns);
@@ -459,18 +542,45 @@ std::uint32_t Stm32wb55::read_mmio(std::uint32_t address, unsigned size) {
         default: break;
         }
     }
-    if (address >= RccBase && address < RccBase + 0x400)
-        return lane_read(registers_[address & ~3u], address, size);
+    if (address >= RccBase && address < RccBase + 0x400) {
+        std::uint32_t value = registers_[address & ~3u];
+        // Prescaler-applied flags (RM0434 8.4.3 HPREF/PPRE1F/PPRE2F, 8.4.32
+        // SHDHPREF/C2HPREF): new dividers take effect at once in the model.
+        if ((address & ~3u) == RccBase + 0x08)
+            value |= 7u << 16;
+        else if ((address & ~3u) == RccBase + 0x108)
+            value |= 3u << 16;
+        return lane_read(value, address, size);
+    }
     if (address >= PwrBase && address < PwrBase + 0x100)
         return lane_read(registers_[address & ~3u], address, size);
     if ((address & ~3u) == FlashControlBase + 0x3c)
         return lane_read(0, address, size);
+    // FLASH_SFR (RM0434 3.10.18): CPU2 security enabled (FSD = 0) with the
+    // secure area from page 0xE1, where FUS 1.2.0 + MAC 1.24.0 install.
+    if ((address & ~3u) == FlashControlBase + 0x80)
+        return lane_read(0x000000e1u, address, size);
 
     const std::uint32_t base = address & ~3u;
     std::uint32_t value = registers_[base];
     // GPIO input data follows the output latch for the unwired board pads.
-    if (base >= 0x48000010 && base < 0x48000800 && ((base - 0x48000000) & 0x3ffu) == 0x10)
-        value = registers_[base - 4];
+    // An unwired input with a pull resistor reads the pulled level (RM0434
+    // 9.3.1), so active-low buttons with pull-ups read released.
+    if (base >= 0x48000010 && base < 0x48002000 && ((base - 0x48000000) & 0x3ffu) == 0x10) {
+        const std::uint32_t port = base - 0x10;
+        const std::uint32_t moder = registers_[port];
+        const std::uint32_t pupdr = registers_[port + 0x0c];
+        value = registers_[port + 0x14];
+        for (unsigned pin = 0; pin != 16; ++pin) {
+            if (((moder >> (2 * pin)) & 3u) != 0)
+                continue;
+            const std::uint32_t pull = (pupdr >> (2 * pin)) & 3u;
+            if (pull == 1)
+                value |= 1u << pin;
+            else if (pull == 2)
+                value &= ~(1u << pin);
+        }
+    }
     // USART status bits that the polling HAL expects to be immediately ready.
     const bool uart_isr =
         (base >= 0x40008000 && base < 0x40008400 && ((base - 0x40008000) & 0x3ffu) == 0x1c) ||
@@ -506,6 +616,17 @@ void Stm32wb55::write_mmio(std::uint32_t address, std::uint32_t value, unsigned 
         } else if (base != RngBase + 0x04 && base != RngBase + 0x08) {
             registers_[base] = lane_write(registers_[base], value, address, size);
         }
+        return;
+    }
+    if (address >= Tim2Base && address < Tim2Base + 0x400) {
+        tim2_advance(core_->cycles());
+        const std::uint32_t offset = address & 0x3fcu;
+        const std::uint32_t old_value = offset == 0x10 ? tim2_sr_ : tim2_read(offset);
+        tim2_write(offset, lane_write(old_value, value, address, size));
+        return;
+    }
+    if (address >= Dma1Base && address < Dma1Base + 0x400) {
+        dma_write(base, lane_write(dma_read(base), value, address, size));
         return;
     }
     if ((base & ~0x3ffu) == 0x40013800 && (base & 0x3ffu) == 0x28) {
@@ -592,7 +713,11 @@ void Stm32wb55::write_mmio(std::uint32_t address, std::uint32_t value, unsigned 
             c1toc2sr_ = (c1toc2sr_ & ~clears) | sets;
         } else {
             c2toc1sr_ &= ~clears;
-            if (clears & (1u << 2)) {
+            if ((clears & (1u << 2)) && st_mac_) {
+                // TL_MAC_802_15_4_SendAck: CPU1 released the notification buffer.
+                mac_notification_outstanding_ = false;
+                request_service_at_ns(*cpu2_core_, core_time_ns(*core_) + 1);
+            } else if (clears & (1u << 2)) {
                 rx_notification_outstanding_ = false;
                 deliver_rx_frame();
             }
@@ -641,6 +766,11 @@ void Stm32wb55::write_mmio(std::uint32_t address, std::uint32_t value, unsigned 
 
     std::uint32_t updated = lane_write(registers_[base], value, address, size);
     if (base == RccBase) {
+        // PLLRDY/PLLSAI1RDY follow their enables both ways: embassy turns the
+        // PLL off and waits for PLLRDY to clear before reprogramming it. The
+        // oscillator ready flags stay set as before.
+        updated &= ~((1u << 25) | (1u << 27));
+        if (updated & (1u << 26)) updated |= 1u << 27;
         if (updated & (1u << 0)) updated |= 1u << 1;
         if (updated & (1u << 8)) updated |= 1u << 10;
         if (updated & (1u << 16)) updated |= 1u << 17;
@@ -655,6 +785,27 @@ void Stm32wb55::write_mmio(std::uint32_t address, std::uint32_t value, unsigned 
     }
     registers_[base] = updated;
 
+    if (base == FlashControlBase + 0x08 && updated == 0xcdef89abu) {
+        registers_[FlashControlBase + 0x14] &= ~(1u << 31); // KEYR second key
+    } else if (base == FlashControlBase + 0x14) {
+        // FLASH_CR (RM0434 3.10.5): page erase completes at once; the
+        // programming itself arrives through the flash write handler.
+        if (registers_[FlashControlBase + 0x14] & (1u << 31))
+            updated |= 1u << 31; // LOCK only clears through KEYR
+        if ((updated & (1u << 16)) && (updated & (1u << 1)) && !(updated & (1u << 31))) {
+            const std::uint32_t page = (updated >> 3) & 0xffu;
+            if (page * 0x1000u < FlashSize) {
+                std::memset(flash_ + page * 0x1000u, 0xff, 0x1000u);
+                if (page * 0x1000u < code_end_) {
+                    core_->request_code_invalidation();
+                    cpu2_core_->request_code_invalidation();
+                }
+            }
+            registers_[FlashControlBase + 0x10] |= 1u; // EOP
+        }
+        updated &= ~(1u << 16);
+        registers_[base] = updated;
+    }
     if (!from_cpu2 && base == PwrBase + 0x0c && (updated & (1u << 15))) {
         start_cpu2();
     }
@@ -670,6 +821,7 @@ std::uint64_t Stm32wb55::service(std::uint64_t now_cycle) {
         (void)run_cpu2_until(now_ns);
     rng_advance(now_ns);
     lptim_advance(now_ns);
+    tim2_advance(now_cycle);
     if (!cpu2_model_active_ && air_ && radio_enabled_)
         poll_radio(now_ns);
     if (!cpu2_model_active_ && pending_tx_response_ && now_ns >= pending_tx_.response_ns)
@@ -698,11 +850,34 @@ std::uint64_t Stm32wb55::service(std::uint64_t now_cycle) {
     const std::uint64_t lptim_due_ns = lptim_next_event_ns(now_ns);
     if (lptim_due_ns != Never)
         next = std::min(next, std::max(now_cycle + 1, core_->ns_to_cycles(lptim_due_ns)));
+    const std::uint64_t tim2_due = tim2_next_event(now_cycle);
+    if (tim2_due != Never)
+        next = std::min(next, std::max(now_cycle + 1, tim2_due));
     return next;
 }
 
 std::uint64_t Stm32wb55::service_cpu2(std::uint64_t now_cycle) {
     const std::uint64_t now_ns = core_time_ns(*cpu2_core_);
+    if (cpu2_model_active_ && st_mac_) {
+        const std::uint64_t due_ns = st_mac_service(now_ns);
+        rng_advance(now_ns);
+        lptim_advance(now_ns);
+        std::uint64_t next = Never;
+        auto cycle_at = [&](std::uint64_t at_ns) {
+            const std::uint64_t elapsed_ns = at_ns > cpu2_boot_time_ns_
+                                                 ? at_ns - cpu2_boot_time_ns_
+                                                 : 0;
+            return std::max(now_cycle + 1,
+                            cpu2_boot_cycle_ + cpu2_core_->ns_to_cycles(elapsed_ns));
+        };
+        if (due_ns != Never)
+            next = cycle_at(due_ns);
+        if (air_ && st_mac_->rx_enabled())
+            next = std::min(next, now_cycle + Cpu2RadioPollCycles);
+        if ((rng_cr_ & RngEnable) && !rng_data_ready_ && rng_next_ready_ns_ != 0)
+            next = std::min(next, cycle_at(rng_next_ready_ns_));
+        return next;
+    }
     if (cpu2_model_active_) {
         if (cpu2_model_boot_pending_) {
             initialize_wireless_info();
@@ -828,6 +1003,10 @@ void Stm32wb55::lptim_update_irq() {
 }
 
 void Stm32wb55::ipcc_command(unsigned channel) {
+    if (st_mac_) {
+        st_mac_command(channel, core_time_ns(*cpu2_core_));
+        return;
+    }
     const std::uint32_t bit = 1u << (channel - 1);
     if (channel == 2)
         complete_system_command();
@@ -883,6 +1062,14 @@ void Stm32wb55::start_cpu2() {
     cpu2_model_active_ = true;
     cpu2_model_boot_pending_ = true;
     cpu2_model_pending_channels_ = 0;
+    if (cpu2_model_kind_ == Cpu2Model::StMac802154) {
+        st_mac_ = std::make_unique<StMac>(*mac_host_, device_id_ ^ 0x5354u);
+        st_mac_->set_data_address(StMacDataAddress);
+        st_mac_->set_trace(!cpu2_trace_name_.empty());
+        cpu2_model_boot_due_ns_ = cpu2_boot_time_ns_ + StMacBootNs;
+        mac_notification_outstanding_ = false;
+        radio_poll_ns_ = cpu2_boot_time_ns_;
+    }
     cpu2_core_->reset(Cpu2ModelVector);
     cpu2_core_->set_interrupts_masked(true);
     cpu2_core_->request_service(cpu2_core_->cycles() + 1);
@@ -954,8 +1141,10 @@ void Stm32wb55::signal_cpu1_rx(unsigned) {
 }
 
 void Stm32wb55::signal_cpu1_tx(unsigned) {
+    // TXFIE: a channel that is free (C1TOC2SR bit clear) and not masked by
+    // its CHnFM bit (C1MR bits 16..21) requests the TX-free interrupt.
     const bool pending = (ipcc_c1cr_ & (1u << 16)) &&
-                         ((~c1toc2sr_) & ~ipcc_c1mr_ & 0x003f0000u);
+                         ((~c1toc2sr_) & (~ipcc_c1mr_ >> 16) & 0x3fu);
     core_->set_irq_line(IpccTxIrq, pending);
     if (cpu2_started_)
         core_->request_service(core_->cycles() + 1);
@@ -967,7 +1156,7 @@ void Stm32wb55::signal_cpu2_rx(unsigned) {
     const bool rx_pending = (ipcc_c2cr_ & 1u) &&
                             (c1toc2sr_ & ~ipcc_c2mr_ & 0x003fu);
     const bool tx_pending = (ipcc_c2cr_ & (1u << 16)) &&
-                            ((~c2toc1sr_) & ~ipcc_c2mr_ & 0x003f0000u);
+                            ((~c2toc1sr_) & (~ipcc_c2mr_ >> 16) & 0x3fu);
     cpu2_core_->set_irq_line(Cpu2IpccIrq, rx_pending || tx_pending);
 }
 
@@ -975,20 +1164,20 @@ void Stm32wb55::signal_cpu2_tx(unsigned) {
     signal_cpu2_rx(0);
 }
 
-void Stm32wb55::signal_ready_event() {
-    signal_system_event(0x9200);
+bool Stm32wb55::signal_ready_event() {
+    return signal_system_event(0x9200);
 }
 
-void Stm32wb55::signal_system_event(std::uint16_t subevent) {
+bool Stm32wb55::signal_system_event(std::uint16_t subevent) {
     const std::uint32_t sys_table = ref_table_entry(3);
     const std::uint32_t mm_table = ref_table_entry(4);
     if (sys_table < RamBase || sys_table + 8 > RamBase + RamSize ||
         mm_table < RamBase || mm_table + 8 > RamBase + RamSize)
-        return;
+        return false;
     const std::uint32_t queue = memory_u32(sys_table + 4);
     const std::uint32_t packet = memory_u32(mm_table + 4);
     if (queue < RamBase || packet < RamBase || packet + 16 > RamBase + RamSize)
-        return;
+        return false;
     const std::uint32_t tail = memory_u32(queue + 4);
     memory_put32(packet, queue);
     memory_put32(packet + 4, tail == 0 ? queue : tail);
@@ -1004,6 +1193,7 @@ void Stm32wb55::signal_system_event(std::uint16_t subevent) {
     event[14] = 0;
     c2toc1sr_ |= 1u << 1;
     signal_cpu1_rx(2);
+    return true;
 }
 
 void Stm32wb55::signal_spinel(std::vector<std::uint8_t> frame) {
@@ -1357,6 +1547,325 @@ bool Stm32wb55::read_varint(const std::uint8_t *data, std::size_t size,
         shift += 7;
     }
     return false;
+}
+
+std::uint64_t Stm32wb55::st_mac_service(std::uint64_t now_ns) {
+    std::uint64_t next = Never;
+    if (cpu2_model_boot_pending_) {
+        if (now_ns >= cpu2_model_boot_due_ns_) {
+            // The ready event needs CPU1's system queue and spare buffer
+            // (shci_init, TL_MM_Init); retry until they are published.
+            initialize_mac_wireless_info();
+            if (signal_ready_event())
+                cpu2_model_boot_pending_ = false;
+            else
+                cpu2_model_boot_due_ns_ = now_ns + StMacBootRetryNs;
+        }
+        if (cpu2_model_boot_pending_)
+            next = cpu2_model_boot_due_ns_;
+    }
+    const std::uint32_t pending = cpu2_model_pending_channels_;
+    cpu2_model_pending_channels_ = 0;
+    for (unsigned channel = 1; channel <= 6; ++channel)
+        if (pending & (1u << (channel - 1)))
+            st_mac_command(channel, now_ns);
+    if (air_ && !radio_node_.empty()) {
+        if (st_mac_->rx_enabled()) {
+            const std::uint64_t after = std::min(radio_poll_ns_, now_ns);
+            for (const mcuemu::RadioFrame &frame :
+                 air_->receive(radio_node_, mcuemu::RadioProtocol::Zigbee802154,
+                               st_mac_->channel(), now_ns, after)) {
+                StMacRxFrame received;
+                received.mpdu = frame.payload;
+                received.channel = frame.channel;
+                received.start_ns = frame.start_ns;
+                received.end_ns = frame.end_ns;
+                received.rssi_dbm = frame.rssi_dbm;
+                st_mac_->receive(received, now_ns);
+            }
+        }
+        radio_poll_ns_ = now_ns;
+    }
+    next = std::min(next, st_mac_->service(now_ns));
+    st_mac_deliver_notification();
+    st_mac_flush_trace(now_ns);
+    return next;
+}
+
+void Stm32wb55::st_mac_command(unsigned channel, std::uint64_t now_ns) {
+    const std::uint32_t bit = 1u << (channel - 1);
+    switch (channel) {
+    case 2:
+        // SHCI system command (SHCI_C2_MAC_802_15_4_Init and any other):
+        // a Command Complete with status SUCCESS.
+        complete_system_command();
+        return;
+    case 3: {
+        // TL_MAC_802_15_4_SendCmd: the request sits in p_cmdrsp_buffer as a
+        // TL_CmdPacket_t (8-octet header, type, opcode, plen, payload); the
+        // synchronous status goes back in the same buffer as a TL_EvtPacket_t
+        // whose payload[0] MAC_802_15_4_CallBack_Processing reads.
+        const std::uint32_t table = ref_table_entry(MacTableIndex);
+        const std::uint32_t buffer = memory_u32(table);
+        std::array<std::uint8_t, 12 + 255> packet{};
+        std::uint8_t status = StMac::NotImplemented;
+        if (buffer >= RamBase && memory_read(buffer, packet.data(), 12)) {
+            const std::uint16_t opcode = get16(packet.data() + 9);
+            const std::size_t length = packet[11];
+            const unsigned ocf = opcode & 0x3ffu; // MASK_CMD_CODE_OCF
+            if (memory_read(buffer + 12, packet.data() + 12, length) &&
+                ocf >= MacOpcodeOffset && ocf < MacOpcodeOffset + 0x20u)
+                status = st_mac_->request(static_cast<std::uint8_t>(ocf - MacOpcodeOffset),
+                                          packet.data() + 12, length, now_ns);
+            const std::uint8_t response[4] = {0x09, 0x00, 1, status}; // TL_OTRSP_PKT_TYPE
+            (void)memory_write(buffer + 8, response, sizeof response);
+        }
+        break;
+    }
+    default:
+        // Channel 4 is the memory manager's buffer release (TL_MM): CPU2 takes
+        // the buffers back from pevt_free_buffer_queue; nothing else to do.
+        break;
+    }
+    c1toc2sr_ &= ~bit;
+    signal_cpu1_tx(channel);
+}
+
+void Stm32wb55::st_mac_deliver_notification() {
+    if (mac_notification_outstanding_ || !st_mac_->has_notification())
+        return;
+    const std::uint32_t table = ref_table_entry(MacTableIndex);
+    const std::uint32_t buffer = memory_u32(table + 4); // p_notack_buffer
+    if (buffer < RamBase || buffer + 11 + 255 > RamBase + RamSize)
+        return;
+    const std::optional<StMacNotification> notification = st_mac_->pop_notification();
+    if (!notification->data.empty())
+        (void)memory_write(st_mac_->data_address(), notification->data.data(),
+                           notification->data.size());
+    // TL_EvtPacket_t: header, type, event code, payload length, payload
+    // (the 16-bit MAC_802_15_4_Notification_t subEvtCode, then the structure).
+    std::array<std::uint8_t, 3> stub{0x0c, 0xff,
+                                     static_cast<std::uint8_t>(notification->payload.size())};
+    (void)memory_write(buffer + 8, stub.data(), stub.size());
+    (void)memory_write(buffer + 11, notification->payload.data(), notification->payload.size());
+    mac_notification_outstanding_ = true;
+    c2toc1sr_ |= 1u << 2;
+    signal_cpu1_rx(3);
+}
+
+void Stm32wb55::st_mac_flush_trace(std::uint64_t now_ns) {
+    if (cpu2_trace_name_.empty())
+        return;
+    for (const std::string &line : st_mac_->take_trace()) {
+        char stamp[32];
+        std::snprintf(stamp, sizeof stamp, "%llu.%06llu",
+                      static_cast<unsigned long long>(now_ns / 1000000000ull),
+                      static_cast<unsigned long long>((now_ns / 1000ull) % 1000000ull));
+        std::cerr << "[" << stamp << "] " << cpu2_trace_name_ << " cpu2-mac: " << line << '\n';
+    }
+}
+
+void Stm32wb55::initialize_mac_wireless_info() {
+    const std::uint32_t info = ref_table_entry(0);
+    if (info < RamBase || info + 32 > RamBase + RamSize)
+        return;
+    std::uint8_t *table = ram_ + (info - RamBase);
+    // MB_SafeBootInfoTable_t, MB_FusInfoTable_t, MB_WirelessFwInfoTable_t
+    // (mbox_def.h). Versions are major.minor.sub in bits 31..8: FUS 1.2.0
+    // and MAC 802.15.4 1.24.0; INFO_STACK_TYPE_MAC = 0x40 (shci.h).
+    put32(table + 0, 0x01000000u);
+    put32(table + 4, 0x01020000u);
+    put32(table + 8, 0);
+    put32(table + 12, 0);
+    put32(table + 16, 0x01180000u);
+    put32(table + 20, (12u << 24) | (16u << 16) | 31u);
+    put32(table + 24, 0x40u);
+    put32(table + 28, 0);
+}
+
+std::uint32_t Stm32wb55::dma_read(std::uint32_t address) {
+    const std::uint32_t offset = address - Dma1Base;
+    if (offset == 0x00)
+        return dma1_isr_;
+    if (offset == 0x04)
+        return 0;
+    if (offset >= 0x08 && offset < 0x08 + 7 * 20) {
+        const DmaChannel &channel = dma1_[(offset - 0x08) / 20];
+        switch ((offset - 0x08) % 20) {
+        case 0: return channel.ccr;
+        case 4: return channel.cndtr;
+        case 8: return channel.cpar;
+        case 12: return channel.cmar;
+        default: break;
+        }
+    }
+    return registers_[address];
+}
+
+void Stm32wb55::dma_write(std::uint32_t address, std::uint32_t value) {
+    const std::uint32_t offset = address - Dma1Base;
+    if (offset == 0x00)
+        return;
+    if (offset == 0x04) {
+        dma1_isr_ &= ~value; // IFCR
+        dma_update_irq();
+        return;
+    }
+    if (offset < 0x08 || offset >= 0x08 + 7 * 20) {
+        registers_[address] = value;
+        return;
+    }
+    const unsigned index = (offset - 0x08) / 20;
+    DmaChannel &channel = dma1_[index];
+    switch ((offset - 0x08) % 20) {
+    case 0: {
+        const bool was_enabled = channel.ccr & 1u;
+        channel.ccr = value & 0x7fffu;
+        // Only memory-to-USART1 transfers are modeled (the log of the
+        // zigbee-rs Nucleo image): they complete at once, so the bytes reach
+        // the UART sink when the channel is enabled.
+        const bool to_usart = (channel.ccr & (1u << 4)) && !(channel.ccr & (1u << 14)) &&
+                              channel.cpar == Usart1Tdr;
+        if (!was_enabled && (channel.ccr & 1u) && to_usart) {
+            const unsigned step = 1u << ((channel.ccr >> 10) & 3u);
+            const bool increment = channel.ccr & (1u << 7);
+            for (std::uint32_t i = 0; i != (channel.cndtr & 0xffffu); ++i) {
+                std::uint8_t byte = 0;
+                if (memory_read(channel.cmar + (increment ? i * step : 0), &byte, 1))
+                    uart_tx_.push_back(byte);
+            }
+            channel.cndtr = 0;
+            dma1_isr_ |= 0x7u << (4 * index); // GIF, TCIF, HTIF
+        }
+        dma_update_irq();
+        break;
+    }
+    case 4:
+        if (!(channel.ccr & 1u))
+            channel.cndtr = value & 0xffffu;
+        break;
+    case 8: channel.cpar = value; break;
+    case 12: channel.cmar = value; break;
+    default: break;
+    }
+}
+
+void Stm32wb55::dma_update_irq() {
+    for (unsigned index = 0; index != dma1_.size(); ++index) {
+        const std::uint32_t flags = (dma1_isr_ >> (4 * index)) & 0xfu;
+        const std::uint32_t ccr = dma1_[index].ccr;
+        const bool pending = ((flags & 2u) && (ccr & 2u)) || ((flags & 4u) && (ccr & 4u)) ||
+                             ((flags & 8u) && (ccr & 8u));
+        core_->set_irq_line(Dma1Channel1Irq + index, pending);
+    }
+}
+
+void Stm32wb55::tim2_advance(std::uint64_t now_cycle) {
+    if (!(tim2_cr1_ & 1u) || now_cycle <= tim2_epoch_cycle_)
+        return;
+    const std::uint64_t period = static_cast<std::uint64_t>(tim2_psc_active_) + 1;
+    const std::uint64_t ticks = (now_cycle - tim2_epoch_cycle_) / period;
+    if (ticks == 0)
+        return;
+    const std::uint64_t modulus = static_cast<std::uint64_t>(tim2_arr_) + 1;
+    const std::uint64_t old = tim2_epoch_count_;
+    const std::uint64_t total = old + ticks;
+    for (unsigned i = 0; i != 4; ++i) {
+        const std::uint64_t compare = tim2_ccr_[i];
+        if (compare >= modulus)
+            continue;
+        // CCxIF: the counter reached CCRx somewhere in (old, total].
+        const std::uint64_t first = compare > old ? compare : compare + modulus;
+        if (first <= total)
+            tim2_sr_ |= 2u << i;
+    }
+    if (total >= modulus) {
+        tim2_sr_ |= 1u; // UIF: overflow update event, which also loads PSC
+        tim2_psc_active_ = tim2_psc_;
+    }
+    tim2_epoch_count_ = total % modulus;
+    tim2_epoch_cycle_ += ticks * period;
+    tim2_update_irq();
+}
+
+std::uint32_t Stm32wb55::tim2_counter() const {
+    return static_cast<std::uint32_t>(tim2_epoch_count_);
+}
+
+std::uint64_t Stm32wb55::tim2_next_event(std::uint64_t now_cycle) const {
+    const std::uint32_t enabled = tim2_dier_ & 0x1fu;
+    if (!(tim2_cr1_ & 1u) || enabled == 0)
+        return Never;
+    const std::uint64_t period = static_cast<std::uint64_t>(tim2_psc_active_) + 1;
+    const std::uint64_t modulus = static_cast<std::uint64_t>(tim2_arr_) + 1;
+    const std::uint64_t current = tim2_epoch_count_;
+    std::uint64_t ticks = Never;
+    if (enabled & 1u)
+        ticks = modulus - current;
+    for (unsigned i = 0; i != 4; ++i) {
+        if (!(enabled & (2u << i)) || tim2_ccr_[i] >= modulus)
+            continue;
+        const std::uint64_t compare = tim2_ccr_[i];
+        ticks = std::min(ticks, compare > current ? compare - current : compare + modulus - current);
+    }
+    if (ticks == Never)
+        return Never;
+    return std::max(now_cycle + 1, tim2_epoch_cycle_ + ticks * period);
+}
+
+void Stm32wb55::tim2_update_irq() {
+    core_->set_irq_line(Tim2Irq, (tim2_sr_ & tim2_dier_ & 0x1fu) != 0);
+}
+
+std::uint32_t Stm32wb55::tim2_read(std::uint32_t offset) {
+    switch (offset) {
+    case 0x00: return tim2_cr1_;
+    case 0x0c: return tim2_dier_;
+    case 0x10: return tim2_sr_;
+    case 0x14: return 0;
+    case 0x24: return tim2_counter();
+    case 0x28: return tim2_psc_;
+    case 0x2c: return tim2_arr_;
+    case 0x34: case 0x38: case 0x3c: case 0x40: return tim2_ccr_[(offset - 0x34) / 4];
+    default: return registers_[Tim2Base + offset];
+    }
+}
+
+void Stm32wb55::tim2_write(std::uint32_t offset, std::uint32_t value) {
+    // RM0434 21: TIM2 is a 32-bit up-counter clocked at CK_INT (here the
+    // 64 MHz CPU1 clock) divided by PSC + 1.
+    const std::uint64_t now = core_->cycles();
+    switch (offset) {
+    case 0x00:
+        if (!(tim2_cr1_ & 1u) && (value & 1u))
+            tim2_epoch_cycle_ = now;
+        tim2_cr1_ = value & 0x3ffu;
+        break;
+    case 0x0c: tim2_dier_ = value; break;
+    case 0x10: tim2_sr_ &= value; break; // rc_w0
+    case 0x14:
+        if (value & 1u) {
+            // UG reinitializes the counter and loads the prescaler; it sets
+            // UIF unless URS limits update interrupts to overflows.
+            tim2_epoch_count_ = 0;
+            tim2_epoch_cycle_ = now;
+            tim2_psc_active_ = tim2_psc_;
+            if (!(tim2_cr1_ & (1u << 2)))
+                tim2_sr_ |= 1u;
+        }
+        tim2_sr_ |= value & 0x1eu; // CCxG
+        break;
+    case 0x24:
+        tim2_epoch_count_ = value % (static_cast<std::uint64_t>(tim2_arr_) + 1);
+        tim2_epoch_cycle_ = now;
+        break;
+    case 0x28: tim2_psc_ = value & 0xffffu; break;
+    case 0x2c: tim2_arr_ = value; break;
+    case 0x34: case 0x38: case 0x3c: case 0x40: tim2_ccr_[(offset - 0x34) / 4] = value; break;
+    default: registers_[Tim2Base + offset] = value; return;
+    }
+    tim2_update_irq();
+    core_->request_service(now + 1);
 }
 
 } // namespace stm32wb55emu

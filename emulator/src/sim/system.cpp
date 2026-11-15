@@ -205,6 +205,8 @@ const McuRegistry &McuRegistry::builtin() {
             auto mcu = std::make_unique<Stm32wb55Mcu>(name);
             if (config.eui64)
                 mcu->chip().set_device_id(*config.eui64);
+            if (config.cpu2_model && *config.cpu2_model == "st_mac_802154")
+                mcu->chip().set_cpu2_model(stm32wb55emu::Stm32wb55::Cpu2Model::StMac802154);
             return mcu;
         });
         for (const auto &[model, variant, mhz] :
