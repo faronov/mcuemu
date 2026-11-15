@@ -1,0 +1,38 @@
+# zigbee-rs Zigbee router (examples/nucleo-wb55-router of
+# github.com/faronov/zigbee-rs) on the STM32WB55, joining the TLSR8258 sample
+# gateway. CPU1 runs the unmodified router image; CPU2 is the built-in model
+# of ST's IEEE 802.15.4 MAC coprocessor firmware (cpu2_model: st_mac_802154).
+# Build the image (see docs/stm32wb55.md) and place it at
+# firmware/stm32wb55-zigbee-rs-router.bin. The router logs on USART1.
+version: 1
+
+world:
+  seed: 1
+  duration: 30s
+  radio:
+    - id: air0
+      model: log_distance
+      reference_loss_db: 40
+      path_loss_exponent: 2.5
+
+devices:
+  - id: coordinator
+    mcus:
+      - id: zb
+        model: tlsr8258
+        variant: F1K
+        firmware: ../firmware/samplegw_tb03f.bin
+        radio: { air: air0, position: [0, 0, 1], tx_power_dbm: 10, protocols: [zigbee] }
+
+  - id: wb55
+    mcus:
+      - id: main
+        model: stm32wb55
+        cpu2_model: st_mac_802154
+        firmware: ../firmware/stm32wb55-zigbee-rs-router.bin
+        eui64: 0x0080E12600112233
+        radio: { air: air0, position: [2, 0, 1], tx_power_dbm: 6, protocols: [zigbee] }
+
+attach:
+  - { endpoint: air0, sink: "pcap:stm32wb55-zigbee-rs-air.pcap" }
+  - { endpoint: wb55.main.uart0, sink: text }

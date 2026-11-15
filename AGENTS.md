@@ -87,7 +87,8 @@ ctest --test-dir build --output-on-failure
   the nRF52840 peripherals), `riscvemu-tests`
   (the fork's RISC-V traps and interrupts), `esp32emu-tests` (the ESP32 models and the MAC/AES blocks),
   `efr32emu-tests`
-  (the EFR32MG21), `bl702emu-tests` (the BL702 model), `simcore-tests` (the whole system layer, about 9 s).
+  (the EFR32MG21), `bl702emu-tests` (the BL702 model), `stm32wb55emu-tests` (the ST 802.15.4 MAC
+  model of the STM32WB55 CPU2 and its IPCC mailbox), `simcore-tests` (the whole system layer, about 9 s).
   `ctest -E firmware` runs just those nine.
   The nrf52 test programs are assembly in `tests/nrf52/programs/*.s`; after
   editing one, run `tests/nrf52/programs/build.py` (needs `arm-none-eabi-as`) and
@@ -101,7 +102,9 @@ ctest --test-dir build --output-on-failure
   (image `nrf52840-sensor.bin`) takes under a second;
   `firmware_nrf52840_zigbee_join` and `firmware_efr32mg21_zigbee_join` (images
   `nrf52840-sensor-sht31.bin` / `efr32mg21-sensor.bin`, plus `samplegw_tb03f.bin`)
-  run the two-chip networks in about 15 s each. **Run them after any
+  run the two-chip networks in about 15 s each; `firmware_stm32wb55_zigbee_rs_router_join`
+  (image `stm32wb55-zigbee-rs-router.bin`, the zigbee-rs Nucleo-WB55 router, plus
+  `samplegw_tb03f.bin`) about 20 s. **Run them after any
   change to CPU execution, timing or peripherals**: they are the only check that
   catches subtle timing regressions across nodes.
 - **CI firmware tests** (`.github/workflows/firmware-tests.yml`, runs after

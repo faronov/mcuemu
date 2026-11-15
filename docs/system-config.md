@@ -28,6 +28,7 @@ devices:
         firmware: fw/a.bin # relative to this file; or a list of flash pieces, see below
         cpu2_firmware:     # stm32wb55 only: separate Cortex-M0+ image, same image-piece syntax
           - { file: fw/cpu2.bin, offset: 0xC0000 }
+        cpu2_model: st_mac_802154 # stm32wb55 only, without cpu2_firmware: thread_rcp (default) | st_mac_802154
         efuse: data/chip.efuse # phy6252 only: optional 32-byte external eFuse dump
         rom: data/phy6252-rom.bin # phy6252 only: optional 96 KiB ROM or 128 KiB dump
         clock_hz: 48MHz    # 48000000 | 48MHz | 32kHz
@@ -102,8 +103,11 @@ than a single image at offset 0.
 pieces), loaded into the same flash address space as CPU1. CPU2 starts when
 CPU1 sets C2BOOT. The image must be a raw executable linked for the selected
 flash offset; encrypted STM32 wireless-stack packages are not decoded by the
-emulator. When no CPU2 image is configured, CPU2 execution is skipped and a
-host-side Thread RCP compatibility model handles the IPCC commands instead.
+emulator. When no CPU2 image is configured, a built-in CPU2 model handles the
+IPCC commands instead: `cpu2_model: thread_rcp` (the default, Spinel over the
+Thread channels) or `cpu2_model: st_mac_802154` (ST's IEEE 802.15.4 MAC
+coprocessor SAP, used by the zigbee-rs STM32WB routers). `cpu2_model` and
+`cpu2_firmware` are mutually exclusive.
 See [`stm32wb55.md`](stm32wb55.md) for the current CPU/peripheral coverage.
 
 For `phy6252`, `efuse:` optionally supplies a raw 32-byte external dump, four
@@ -468,8 +472,8 @@ Zigbee RF path; `ble` on it is rejected (its BLE registers are not modeled),
 so BLE traffic comes from scripted parts, which can use the `radio` API in
 [scripting.md](scripting.md). `nrf52840`, `efr32mg21`, `esp32c6` and `bl702` connect an 802.15.4 radio (`zigbee`)
 and reject `ble`. `cc2530f256` connects its IEEE 802.15.4 radio (`zigbee`
-only, default 32 MHz clock). `stm32wb55` connects the host-side Thread RCP
-compatibility radio only when `cpu2_firmware` is absent; with a CPU2 image, the
+only, default 32 MHz clock). `stm32wb55` connects the radio of its built-in
+CPU2 model (`zigbee` only) when `cpu2_firmware` is absent; with a CPU2 image, the
 wireless PHY is not yet modeled. `ca51f253l3` has no radio. The experimental `phy6252` model
 connects its Zephyr PB-03F 802.15.4 path to shared `zigbee` air; this PHY
 behavior is inferred from the Zephyr driver and is not hardware-verified.
