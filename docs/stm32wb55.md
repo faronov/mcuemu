@@ -179,8 +179,10 @@ second commissioning attempt sees the gateway's beacon on channel 15, associates
 receives the network key in a Transport-Key, starts as a router (MLME-START),
 sends Device_annce and unicast NWK frames to the coordinator and receives NWK
 unicasts and broadcasts from it. The coordinator then sends its unicasts with a
-NWK source-route subframe of relay count 0, which zigbee-rs' NWK frame parser
-(`zigbee-nwk/src/frames.rs`) rejects, so the router never sees the
-Node_Desc_rsp, gives up after three tries at about 23 s, leaves and rejoins. That
-is a zigbee-rs stack behaviour, not a MAC-model one: the MAC model delivered
-each of those frames as MCPS-DATA.indication.
+NWK source-route subframe of relay count 0 (relay index 0). zigbee-rs before
+master `184b82d` rejected those frames in its NWK parser, so the router never saw
+the Node_Desc_rsp, gave up after three tries at about 23 s, left and rejoined.
+That was a zigbee-rs stack behaviour, not a MAC-model one: the MAC model
+delivered each of those frames as MCPS-DATA.indication. With zigbee-rs `184b82d`
+or later the router completes commissioning security and stays joined for the
+whole 60 s run.
