@@ -145,7 +145,7 @@ jobs:
           fi
 
   prepare:
-    name: "Test build run ${{ needs.gate.outputs.run_id }}"
+    name: Use the emulator build
     needs: gate
     if: ${{ needs.gate.outputs.proceed == 'true' }}
     runs-on: ubuntu-latest
