@@ -3,8 +3,9 @@
 
 The image programs UICR through NVMC on its first start and resets, then brings
 up the clocks, GPIO, the RTC time driver and SAADC, configures the RADIO for IEEE
-802.15.4, uses RNG and ECB, and goes to sleep in WFE. The check follows that path in the register
-trace and requires the core to end asleep with time passing.
+802.15.4, uses RNG and ECB (in either order: builds differ), and goes to sleep in
+WFE. The check follows that path in the register trace and requires the core to
+end asleep with time passing.
 """
 
 import re
@@ -49,8 +50,6 @@ def main() -> int:
         ("RTC1 start (the time driver)", r"^W 0x40011000 <- 0x1 "),
         ("SAADC VDD channel (PSELP = 9)", r"^W 0x40007510 <- 0x9 "),
         ("RADIO MODE = IEEE 802.15.4 250 kbit/s", r"^W 0x40001510 <- 0xf "),
-        ("RNG start", r"^W 0x4000d000 <- 0x1 "),
-        ("ECB start", r"^W 0x4000e000 <- 0x1 "),
     ]
     position = 0
     for what, pattern in milestones:
@@ -58,6 +57,9 @@ def main() -> int:
         if not match:
             return fail(f"never reached: {what}", trace)
         position = match.start()
+    for what, pattern in [("RNG start", r"^W 0x4000d000 <- 0x1 "), ("ECB start", r"^W 0x4000e000 <- 0x1 ")]:
+        if not re.compile(pattern, re.MULTILINE).search(trace, position):
+            return fail(f"never reached: {what} (after the RADIO setup)", trace)
 
     resets = len(re.findall(r"^W 0x40000904 <- 0xffffffff ", trace, re.MULTILINE))
     if resets < 2:

@@ -23,6 +23,9 @@ chips and a declarative system layer on top:
   See `docs/nrf52840.md`.
 - **EFR32MG21** (Silicon Labs, Cortex-M33): the chip in `emulator/src/efr32/`
   (`efr32emu::Efr32mg21`) on the same `cortexm::Core`. See `docs/efr32mg21.md`.
+  Its radio has three register interfaces: RAIL (`RailRegs`), the current zigbee-rs
+  `efr32s2-hal` driver without RAIL (`RsmRadio`, `rsm.cpp`) and the old zigbee-rs
+  scaffold at `0x40090000` (`radio.cpp`).
 - **ESP32-C6 / ESP32-H2** (Espressif, RV32IMAC): a work-in-progress chip
   model in `emulator/src/esp32/` (`esp32emu::Esp32`, `mcuemu run --model
   ESP32C6|ESP32H2`, `esp32c6`/`esp32h2` in `sim` with an 802.15.4 MAC on the shared air) on the generic hart `riscv::Core` (`emulator/src/riscv/`) and the
@@ -114,7 +117,13 @@ ctest --test-dir build --output-on-failure
   when the device joins and the two sides exchange NWK data, judged from the
   pcap, not from RAM addresses. UART and RTT output must reach the job log
   (sinks `hex`/`text` or `--trace-uart`). These scenarios also run locally:
-  put the images in `firmware/` under the names the scenario yaml uses.
+  put the images in `firmware/` under the names the scenario yaml uses. The run
+  step uses `pipefail`, so the scenario's status is the job's; a known emulator
+  gap is a matrix entry with `known_failure: <reason>` (shown failed, does not
+  fail the workflow). The zigbee-rs images build from the pinned commit
+  `ZIGBEE_RS_REF`; moving it is a deliberate change (see `docs/firmware-ci.md`).
+  Runs started by "Build mcuemu" use `main`'s workflow file: test workflow
+  changes with `gh workflow run firmware-tests.yml --ref BRANCH -f run_id=ID`.
 - Run ctest from the repository root with `--test-dir build`; running it from
   elsewhere creates a stray `Testing/` directory.
 - After renaming or moving the folder, delete `build/` and reconfigure (the
