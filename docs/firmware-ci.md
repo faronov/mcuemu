@@ -1,9 +1,18 @@
 # Firmware tests in CI
 
 `.github/workflows/firmware-tests.yml` runs real firmware on the emulator. It
-starts when "Build mcuemu" finishes successfully (or by hand: *Run workflow*,
-optionally with the id of a build run) and uses the Linux binary from that build.
-It runs on the latest Ubuntu runner. A run started by a build always uses the
+starts when a "Build mcuemu" run completes (or by hand: *Run workflow*,
+optionally with the id of a build run) and uses the Linux binary from that build:
+the `mcuemu-linux-amd64` artifact of its `linux-amd64` job. The first job (`gate`)
+checks only that: when the Linux job succeeded and the artifact is there, the
+tests run, whatever happened to the other platforms (a macOS arm64 job that never
+got a runner, Windows); otherwise the run is skipped with a notice (a `run_id`
+given by hand fails instead). Without a `run_id` it takes the latest run on `main`
+whose Linux job succeeded. "Build mcuemu" itself is left as it is: macOS arm64
+stays a required platform, so a job that never gets a runner still turns that
+run red (rerun it), and a job `timeout-minutes` would not help, since it limits
+running time, not the wait for a runner. It runs on the latest Ubuntu runner. A
+run started by a build always uses the
 workflow file of `main`, whatever branch was built; to try a change to this
 workflow (or to the pins below) before merging, run it by hand on the branch,
 with the id of the branch's "Build mcuemu" run:
