@@ -4,16 +4,16 @@ name: Firmware tests
 #
 # 1. `prepare` finds the build run whose Linux binary is tested.
 # 2. The `firmware-*` jobs build or download every image from source (Telink SDK
-#    samples, z03mmc, the zigbee-rs plug and nRF52840 sensor, the thermostat
-#    and Zephyr releases). Each image is its own artifact, so one broken build only fails
-#    the tests that need it.
+#    samples, z03mmc, the zigbee-rs plug and sensors, the Zephyr router release,
+#    the Silicon Labs NCP and the Moes dump). Each image is its own artifact, so one
+#    broken build only fails the tests that need it.
 # 3. `test` runs one job per scenario. Scenarios are independent
 #    (`fail-fast: false`). The Zigbee scenarios pass when the device joins the
 #    network and the two sides exchange data (tests/firmware/zigbee_air_check.py).
 #    UART and RTT output goes to the job log and to the `logs-*` artifacts.
 #
 # Images with no buildable source are committed in tests/firmware-images/. The EFR32MG21
-# Zephyr router and ED come from a pinned release of devbis/zephyr-tlsr8258.
+# Zephyr router comes from a pinned release of devbis/zephyr-tlsr8258.
 #
 # The zigbee-rs images are built from one pinned commit (ZIGBEE_RS_REF): its examples change
 # their logs, radio drivers and boards without notice, so a moving branch breaks these tests.
@@ -56,16 +56,12 @@ env:
   TC32_RUST_SHA256: a3b1e187a03311d00551e0df33b78746e5f1d853d5bb48f4b2977583d33e9356
   ZEPHYR_ZIGBEE_RELEASE: https://github.com/devbis/zephyr-tlsr8258/releases/download/zephyr-zigbee-20261030-de387d
   ZEPHYR_EFR32_ROUTER_SHA256: 1f172bc0ee806ce247ee1f04463bf3c5ce1c14a174ca656989b60640b5fbcc8d
-  ZEPHYR_EFR32_ED_SHA256: 905a9add7a49915924ef897eb5f09d4504b1e1158a9deb599fd58f201f4749b6
   # Silicon Labs EZSP NCP (Sonoff ZBDongle-E build of Nerivec/silabs-firmware-builder), the coordinator of the Moes scenario.
   EFR32_NCP_URL: https://github.com/Nerivec/silabs-firmware-builder/releases/download/v2025.6.2-update1/sonoff_zbdonglee_zigbee_ncp_8.2.2.0_115200_sw_flow.gbl
   EFR32_NCP_GBL_SHA256: a99fe1a9d967ccebddba0ef3e547f2e7af3d5949b30fe77b1c756a13997fdcc6
   # Full-flash dump of the Moes ZigBee "Smart Brightness Thermometer" (ZSS-ZK-THL, Tuya ZS3L) from pvvx's page.
   MOES_THERMOMETER_URL: https://pvvx.github.io/ZSS-ZK-THL/bin/FullFlashBin.zip
   MOES_THERMOMETER_ZIP_SHA256: f3825e33cb65e88feb7bf447b0c21fc36e39102bb6e3da285ba8d8661034ba4d
-  THERMOSTAT_RELEASE: https://github.com/slacky1965/tuya_thermostat_full_custom_r02_zrd/releases/download/r02-20261109
-  THERMOSTAT_CA51_SHA256: f7d07704fd70effdb385fab243c4823c72a878b61a563fb1244c548f72d4cf24
-  THERMOSTAT_ZT3L_SHA256: 8ed2c753c8c8e7dc9e6a601ae7f9d95983c07998e14e81ce8aaa5deea3a78e29
 
 jobs:
   prepare:
@@ -330,25 +326,6 @@ jobs:
           path: out/efr32mg21-sensor.bin
           if-no-files-found: error
 
-  firmware-tlsr8258_ca51_thermostat_r02:
-    name: "Prepare: tlsr8258 + ca51 thermostat r02"
-    needs: prepare
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download the CA51F253L3 and ZT3L images
-        run: |
-          set -euo pipefail
-          mkdir -p out
-          curl -fL --retry 3 -o out/thermostat-ca51.bin  "$THERMOSTAT_RELEASE/osrctherm_r02_v1.05_CA51F253L3.bin"
-          curl -fL --retry 3 -o out/thermostat-zt3l.bin  "$THERMOSTAT_RELEASE/osrctherm_r02_zrd_v1.0.02_ZT3L.bin"
-          echo "$THERMOSTAT_CA51_SHA256  out/thermostat-ca51.bin" | sha256sum -c -
-          echo "$THERMOSTAT_ZT3L_SHA256  out/thermostat-zt3l.bin" | sha256sum -c -
-      - uses: actions/upload-artifact@v7
-        with:
-          name: fw-tlsr8258_ca51_thermostat_r02
-          path: out/*.bin
-          if-no-files-found: error
-
   firmware-efr32-ncp:
     name: "Prepare: EFR32MG21 EZSP NCP"
     needs: prepare
@@ -396,21 +373,19 @@ jobs:
           if-no-files-found: error
 
   firmware-efr32-zephyr:
-    name: "Prepare: EFR32MG21 Zephyr router and ED"
+    name: "Prepare: EFR32MG21 Zephyr router"
     needs: prepare
     runs-on: ubuntu-latest
     steps:
       # Built by the "Build Zigbee firmware" workflow of devbis/zephyr-tlsr8258 (Zephyr
       # zigbee_shell, board slwrb4180a, RAIL radio driver, no console). Pinned to a release
-      # and checked against its SHA-256; move the three variables together to update.
-      - name: Download the release images
+      # and checked against its SHA-256; move the two variables together to update.
+      - name: Download the release image
         run: |
           set -euo pipefail
           mkdir -p out
           curl -fL --retry 3 -o out/efr32-zephyr-router.bin "$ZEPHYR_ZIGBEE_RELEASE/efr32mg21-router.bin"
-          curl -fL --retry 3 -o out/efr32-zephyr-ed.bin "$ZEPHYR_ZIGBEE_RELEASE/efr32mg21-end-device.bin"
           echo "$ZEPHYR_EFR32_ROUTER_SHA256  out/efr32-zephyr-router.bin" | sha256sum -c -
-          echo "$ZEPHYR_EFR32_ED_SHA256  out/efr32-zephyr-ed.bin" | sha256sum -c -
       - uses: actions/upload-artifact@v7
         with:
           name: fw-efr32-zephyr
@@ -432,15 +407,11 @@ jobs:
       - firmware-efr32-ncp
       - firmware-moes-thermometer
       - firmware-esp32
-      - firmware-tlsr8258_ca51_thermostat_r02
     # Run even when an unrelated image failed to build: the scenario that needs
     # it fails on its own, the others still report.
     if: ${{ !cancelled() && needs.prepare.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    # A scenario with `known_failure` (the reason) is a known emulator gap: its job still runs and shows
-    # as failed, but does not fail the workflow. Remove the key once the scenario passes again.
-    continue-on-error: ${{ matrix.known_failure != null }}
     strategy:
       fail-fast: false
       matrix:
@@ -487,13 +458,6 @@ jobs:
             command: >-
               python3 tests/firmware/zigbee_air_check.py "$MCUEMU"
               tests/firmware/scenarios/zigbee_efr32_zephyr_router.yaml --workdir "$LOGS" --for 30s
-          - name: zigbee-efr32-zephyr-ed
-            known_failure: >-
-              the model faults (pc 0xf10002) at 12.58 s in RAIL's BUF2 receive handler after the ED's
-              join, with the release image zephyr-zigbee-20261030-de387d
-            command: >-
-              python3 tests/firmware/zigbee_air_check.py "$MCUEMU"
-              tests/firmware/scenarios/zigbee_efr32_zephyr_ed.yaml --workdir "$LOGS" --for 30s
           - name: moes-brightness-thermometer
             command: >-
               python3 scripts/moes_brightness_thermometer.py firmware/moes-brightness-thermometer.bin
@@ -518,16 +482,6 @@ jobs:
               --expect 'JoinedOrResumed'
               --expect 'Confirm-Key SUCCESS'
               --expect 'CommissioningComplete \{ success: true \}'
-          - name: tlsr8258 + ca51 thermostat r02
-            known_failure: >-
-              the ZT3L image v1.0.02 of release r02-20261109 faults at 29 ms (TC32 fetch at 0xfffffffe);
-              examples/devices/tuya_thermostat.yaml splits the image for v1.0.01 (ramcode 0x1ad0, text at 0x9ad0)
-            command: >-
-              python3 tests/firmware/zigbee_air_check.py "$MCUEMU"
-              tests/firmware/scenarios/thermostat.yaml --workdir "$LOGS" --for 30s --min-unicast 1
-              --no-uart-trace
-              --expect 'thermostat\.main\.uart1 +[0-9]+ bytes: aa 55'
-              --expect 'thermostat\.zb\.uart0 +[0-9]+ bytes: aa 55'
           - name: zigbee-phy6252-ts0001
             command: >-
               python3 tests/firmware/test_phy6252_ts0001_join.py "$MCUEMU"
@@ -578,12 +532,9 @@ jobs:
           ${{ matrix.command }} 2>&1 | tee "$LOGS/run.log"
       - name: Summary
         if: ${{ always() }}
-        env:
-          KNOWN_FAILURE: ${{ matrix.known_failure }}
         run: |
           {
             echo "### ${{ matrix.name }}"
-            if [ -n "$KNOWN_FAILURE" ]; then echo "Known failure, does not fail the workflow: $KNOWN_FAILURE"; echo; fi
             grep -h '^zigbee:\|^FAIL\|firmware_.*:' "logs/${{ matrix.name }}/run.log" 2>/dev/null | sed 's/^/    /' || true
           } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v7

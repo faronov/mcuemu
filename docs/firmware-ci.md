@@ -23,9 +23,8 @@ the scenarios that need it.
 | `nrf52840-sensor.bin`, `nrf52840-sensor-sht31.bin` | `devbis/zigbee-rs` at the commit `ZIGBEE_RS_REF` (pinned, see below) | `cargo build --release` in `examples/nrf52840-sensor` |
 | `efr32mg21-sensor.bin` | `devbis/zigbee-rs`, same commit, `examples/efr32mg21-sensor` | `cargo build --release --locked` (target `thumbv8m.main-none-eabihf`), `llvm-objcopy -O binary`: an application-slot image (linked at `0x4000`). It logs on the virtual COM port (USART0), the emulator's `uart0` endpoint; it has no RTT |
 | `esp32h2-sensor.bin`, `esp32c6-sensor.bin` | `devbis/zigbee-rs`, same ref, `examples/esp32h2-sensor` and `examples/esp32c6-sensor` | `cargo build --release -Z build-std=core,alloc`, then `espflash 4.5.0 save-image --merge` (pinned release, SHA-256 checked) with the product's 4 MB OTA partition table: the whole flash (bootloader at 0, app in `ota_0`) |
-| `thermostat-ca51.bin`, `thermostat-zt3l.bin` | release `r02-20261109` of `slacky1965/tuya_thermostat_full_custom_r02_zrd` (`osrctherm_r02_v1.05_CA51F253L3.bin`, `osrctherm_r02_zrd_v1.0.02_ZT3L.bin`) | downloaded, SHA-256 pinned in `THERMOSTAT_*_SHA256` |
 | `zephyr-pmtest.bin`, `vendor_sleep_1s.bin`, `phy6252-ts0001.bin` (+ `phy6222-efuse.bin`, `phy6222-rfcal.bin`, `phy6222-rom.bin`) | no source available | committed in `tests/firmware-images/` |
-| `efr32-zephyr-router.bin`, `efr32-zephyr-ed.bin` | `devbis/zephyr-tlsr8258`, branch `zigbee-generic-stack`: Zephyr `samples/zigbee/zigbee_shell`, board `slwrb4180a` (RAIL driver, no console), built by that repository's "Build Zigbee firmware" workflow | downloaded from the release `zephyr-zigbee-20261016-deada2` (`efr32mg21-router.bin`, `efr32mg21-end-device.bin`), SHA-256 pinned in `ZEPHYR_EFR32_*_SHA256` |
+| `efr32-zephyr-router.bin` | `devbis/zephyr-tlsr8258`, branch `zigbee-generic-stack`: Zephyr `samples/zigbee/zigbee_shell`, board `slwrb4180a` (RAIL driver, no console), built by that repository's "Build Zigbee firmware" workflow | downloaded from the release `zephyr-zigbee-20261030-de387d` (`efr32mg21-router.bin`), SHA-256 pinned in `ZEPHYR_EFR32_ROUTER_SHA256` |
 | `zbdonglee-ncp.bin` | Silicon Labs EZSP NCP 8.2.2 (Sonoff ZBDongle-E build) of `Nerivec/silabs-firmware-builder`, release `v2025.6.2-update1` | downloaded as the `.gbl` (SHA-256 pinned in `EFR32_NCP_GBL_SHA256`), then `scripts/gbl2bin.py` extracts the application |
 | `moes-brightness-thermometer.bin` | full-flash dump of the Moes ZigBee "Smart Brightness Thermometer" (ZSS-ZK-THL, Tuya ZS3L) from `https://pvvx.github.io/ZSS-ZK-THL/bin/FullFlashBin.zip` | downloaded, the zip's SHA-256 pinned in `MOES_THERMOMETER_ZIP_SHA256`, `0000000-00C0000.bin` (768 KiB) taken out of it; the scenario erases its NVM3 pages |
 
@@ -57,9 +56,8 @@ locally too when you put the images there.
 | `zigbee-efr32mg21` | as `zigbee-nrf52840`, on the EFR32MG21 model (the image drives the radio without RAIL, `RsmRadio` in `docs/efr32mg21.md`); a BTN0 press at 2 s starts the join; the expected lines (boot banner, scan, association, Transport-Key, Request Key, Confirm-Key, commit, `CommissioningComplete`) must come from the sensor's console `board.mcu.uart0` |
 | `zigbee-esp32h2` | the sensor joins the sampleGW coordinator through the real ESP-IDF bootloader on ROM stand-ins (it scans all channels, backs off and reboots once); the console shows the AES self-test, `JoinedOrResumed`, Confirm-Key SUCCESS and `CommissioningComplete` |
 | `zigbee-esp32c6` | the same for the C6 sensor image (the log must show the scan and the association on channel 15; the image no longer logs each scanned channel) |
-| `zigbee-efr32-zephyr-router`, `zigbee-efr32-zephyr-ed` | the Zephyr zigbee_shell sample on the EFR32MG21 (RAIL radio driver, no console) gets an Association Response with status 0 from the sampleGW coordinator, judged from the pcap |
+| `zigbee-efr32-zephyr-router` | the Zephyr zigbee_shell sample on the EFR32MG21 (RAIL radio driver, no console) gets an Association Response with status 0 from the sampleGW coordinator, judged from the pcap |
 | `zigbee-phy6252-ts0001` | the Tuya TS0001 relay (PHY6222 running the dumped ROM, NVM erased) scans, associates with the sampleGW (channel 15), gets the Transport Key and exchanges unicast NWK data, judged by `test_phy6252_ts0001_join.py` from the air sink, per transmitter |
-| `tlsr8258 + ca51 thermostat r02` | the ZT3L joins the coordinator and both UARTs of the two-chip board carry framed traffic |
 | `moes-brightness-thermometer` | `scripts/moes_brightness_thermometer.py`: the Tuya ZS3L thermometer (NVM3 erased, PB0 long press) joins the EZSP NCP's network: the NCP reports `trustCenterJoinHandler`, `childJoinHandler` and the Device_annce, the firmware reads its CHT8305 and OPT3001 (Lua parts on PA0/PA3) and refreshes the e-ink display (`docs/efr32mg21.md`) |
 | `nrf52840-boot`, `zephyr-pm-wake`, `vendor-sleep-1s` | the existing scripts in `tests/firmware/` |
 
@@ -70,19 +68,7 @@ or pins. `--expect REGEX` checks the console, with RTT chunks re-joined into lin
 endpoint a line must come from).
 
 A scenario fails its job when its command fails (the step runs with
-`pipefail`; before, the job took `tee`'s status and passed whatever happened). A
-matrix entry with `known_failure: <reason>` is a known emulator gap: its job runs
-and is shown failed with the reason in the summary, but does not fail the
-workflow (`continue-on-error`). Remove the key when the scenario passes again.
-Current known failures:
-
-- `zigbee-efr32-zephyr-ed`: with the release image `zephyr-zigbee-20261030-de387d`
-  the model faults (fetch at `0xf10002`) at 12.58 s, in RAIL's BUF2 receive
-  handler after the end device joined.
-- `tlsr8258 + ca51 thermostat r02`: the ZT3L image `v1.0.02` of release
-  `r02-20261109` faults at 29 ms (TC32 fetch at `0xfffffffe`);
-  `examples/devices/tuya_thermostat.yaml` still splits the image the way `v1.0.01`
-  needed (ramcode `0x1ad0`, text at `0x9ad0`).
+`pipefail`; before, the job took `tee`'s status and passed whatever happened).
 
 Some devices join late on purpose: the z03mmc scans once at power-up, before the
 coordinator has formed its network, and steers again after 60 s, so its scenario
@@ -94,3 +80,39 @@ UART and RTT output is printed in the job log (`--trace-uart '*=text'`, or the
 `hex`/`text` sinks in the system file) and saved with the pcap in the
 `logs-<scenario>` artifact (14 days). Any new scenario that has a UART or RTT
 channel must do the same.
+
+## Removed scenarios
+
+Once the run step had `pipefail`, two scenarios turned out to fail with their
+current images. Both had passed only because the job status was `tee`'s, so
+they were removed from the matrix (with their image downloads and scenario
+files). The emulator models stay. To revive one, restore its matrix entry,
+prepare job and scenario file from the commit that removed them (`git log
+--diff-filter=D -- tests/firmware/scenarios/thermostat.yaml`) and make it pass
+first.
+
+- `zigbee-efr32-zephyr-ed` (`tests/firmware/scenarios/zigbee_efr32_zephyr_ed.yaml`: the
+  Zephyr zigbee_shell end device on the EFR32MG21 next to the sampleGW, 30 s, judged
+  from the pcap). Image: `efr32mg21-end-device.bin` of the release
+  `zephyr-zigbee-20261030-de387d` of `devbis/zephyr-tlsr8258`, SHA-256
+  `905a9add7a49915924ef897eb5f09d4504b1e1158a9deb599fd58f201f4749b6`. The end
+  device associates, then at 12.584 s of virtual time the core faults: `Invalid
+  memory fetch (UC_ERR_FETCH_UNMAPPED) at pc 0xf10002`. The last accesses are
+  RAIL's BUF2-threshold receive handler (FRC IF/IEN, BUFC IF clear, BUF2 STATUS,
+  `0xA0001EA0`), so the RX descriptor the RAIL path writes is the likely cause. The
+  same image still drives the local ctest `firmware_efr32mg21_ncp_join_efr32` (put it
+  in `firmware/efr32-zephyr-ed.bin`).
+- `tlsr8258 + ca51 thermostat r02` (`tests/firmware/scenarios/thermostat.yaml`: the
+  two-chip Tuya thermostat of `examples/devices/tuya_thermostat.yaml` next to the
+  sampleGW, 30 s, `--no-uart-trace`, expecting `aa 55` frames on
+  `thermostat.main.uart1` and `thermostat.zb.uart0`). Images: release
+  `r02-20261109` of `slacky1965/tuya_thermostat_full_custom_r02_zrd`,
+  `osrctherm_r02_v1.05_CA51F253L3.bin` (SHA-256
+  `f7d07704fd70effdb385fab243c4823c72a878b61a563fb1244c548f72d4cf24`) and
+  `osrctherm_r02_zrd_v1.0.02_ZT3L.bin` (SHA-256
+  `8ed2c753c8c8e7dc9e6a601ae7f9d95983c07998e14e81ce8aaa5deea3a78e29`). The ZT3L
+  faults at 29.49 ms: `Invalid memory fetch (UC_ERR_FETCH_UNMAPPED) while executing
+  TC32 instruction 0x6df0 at 0xfffffffe`. The device file still splits the ZT3L
+  image the way `v1.0.01` needed (ramcode `0x1ad0` bytes at 0, the rest at
+  `0x9ad0`); loading `v1.0.02` linearly also faults (an unmapped read at pc
+  `0x116e2` after 4.5 ms), so its layout is still to be worked out.

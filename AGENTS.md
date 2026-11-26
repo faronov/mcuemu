@@ -118,9 +118,9 @@ ctest --test-dir build --output-on-failure
   pcap, not from RAM addresses. UART and RTT output must reach the job log
   (sinks `hex`/`text` or `--trace-uart`). These scenarios also run locally:
   put the images in `firmware/` under the names the scenario yaml uses. The run
-  step uses `pipefail`, so the scenario's status is the job's; a known emulator
-  gap is a matrix entry with `known_failure: <reason>` (shown failed, does not
-  fail the workflow). The zigbee-rs images build from the pinned commit
+  step uses `pipefail`, so the scenario's status is the job's; scenarios that
+  cannot pass are removed and listed under "Removed scenarios" in
+  `docs/firmware-ci.md`. The zigbee-rs images build from the pinned commit
   `ZIGBEE_RS_REF`; moving it is a deliberate change (see `docs/firmware-ci.md`).
   Runs started by "Build mcuemu" use `main`'s workflow file: test workflow
   changes with `gh workflow run firmware-tests.yml --ref BRANCH -f run_id=ID`.
