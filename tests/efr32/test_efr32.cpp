@@ -286,6 +286,132 @@ void test_efr32_rtcc_counts_and_compares() {
     CHECK((c.r(0x48000014) & 8) == 0);
 }
 
+// STATUS.RUNNING follows START/STOP, compare channel 0 sets IF.CC0 (bit 2) like CC1, and the
+// counter wrapping to 0 sets IF.OF (the zigbee-rs HAL's time driver uses all three).
+void test_efr32_rtcc_cc0_running_and_overflow() {
+    Chip c;
+    CHECK((c.r(0x48000010) & 1) == 0);
+    c.w(0x58000004, 1);      // EN
+    c.w(0x5800000c, 1);      // CMD.START
+    CHECK((c.r(0x48000010) & 1) == 1);
+    c.w(0x48000030, 2);      // CC0.CTRL = OUTPUTCOMPARE
+    c.w(0x48000034, 9);      // CC0.OCVALUE: match at tick 10
+    c.w(0x48000018, 4);      // IEN.CC0
+    const std::uint64_t start = c.chip.core().cycles();
+    c.chip.run(start + 5000); // about 4 ticks
+    CHECK((c.r(0x48000014) & 4) == 0);
+    c.chip.run(start + 20000); // about 17 ticks
+    CHECK((c.r(0x48000014) & 4) != 0);
+    CHECK((c.r(0x48000014) & 1) == 0);
+    c.w(0x48000020, 0xfffffff0u); // 16 ticks before the wrap
+    c.chip.run(c.chip.core().cycles() + 25000); // about 21 ticks
+    CHECK((c.r(0x48000014) & 1) != 0);
+    CHECK(c.r(0x48000020) < 16);
+    c.w(0x4800000c, 2);      // CMD.STOP
+    CHECK((c.r(0x48000010) & 1) == 0);
+}
+
+// TIMER0 counts core cycles divided by CFG.PRESC + 1 while started (the zigbee-rs HAL's
+// busy-wait clock); TIMER2 is 16 bits wide.
+void test_efr32_timer_counts() {
+    Chip c;
+    c.w(0x4004800c, 1);      // START without EN: stays stopped
+    CHECK((c.r(0x40048010) & 1) == 0);
+    c.w(0x40048030, 1);      // EN
+    c.w(0x4004800c, 1);      // CMD.START
+    CHECK((c.r(0x40048010) & 1) == 1);
+    const std::uint32_t first = c.r(0x40048024);
+    c.chip.core().advance_to(c.chip.core().cycles() + 1000);
+    CHECK(c.r(0x40048024) - first == 1000);
+    c.w(0x40048004, 3u << 18); // CFG.PRESC = DIV4
+    const std::uint32_t second = c.r(0x40048024);
+    c.chip.core().advance_to(c.chip.core().cycles() + 1000);
+    CHECK(c.r(0x40048024) - second == 250);
+    c.w(0x4004800c, 2);      // CMD.STOP
+    const std::uint32_t stopped = c.r(0x40048024);
+    c.chip.core().advance_to(c.chip.core().cycles() + 1000);
+    CHECK(c.r(0x40048024) == stopped && (c.r(0x40048010) & 1) == 0);
+    c.w(0x40050030, 1);      // TIMER2: EN, CNT near the 16-bit top, START
+    c.w(0x40050024, 0xfff0);
+    c.w(0x4005000c, 1);
+    c.chip.core().advance_to(c.chip.core().cycles() + 0x20);
+    CHECK(c.r(0x40050024) == 0x10);
+}
+
+// The radio as the zigbee-rs efr32s2-hal driver runs it (RsmRadio): a vector table of END slots
+// hands the radio to the model, a self-JUMP holds a warm state, the LO counter guides the VCO
+// search, BUF1 receives [PHR][PSDU][RSSI] and BUF0 is sent when TXWARM is released.
+void test_efr32_rsm_radio() {
+    constexpr std::uint32_t Seq = 0xB0000000, Rac = 0xB8020000, Frc = 0xB8004000, Synth = 0xB8018000,
+                            Agc = 0xB800C000, Bufc = 0x54004000;
+    constexpr std::uint32_t End = 0xF800F800;
+    auto jump = [](std::uint32_t state) { return (4 * state) << 16 | 0x9802u; };
+    mcuemu::VirtualAir air;
+    air.set_node("a", {});
+    air.set_node("peer", {});
+    Chip a;
+    a.chip.connect_radio(air, "a");
+    auto state = [&] { return (a.r(Rac + 0x0C) >> 24) & 0xf; };
+    for (std::uint32_t slot = 0; slot != 16; ++slot)
+        a.w(Seq + 4 * slot, slot == 1 ? jump(1) : End); // RXWARM parked
+    a.w(Rac + 0x64, Seq);                                // VECTADDR
+    a.w(Rac + 0x68, 1);                                  // SEQCTRL.COMPACT: the model takes over
+    const std::uint32_t freq = static_cast<std::uint32_t>((2425000000ull << 19) / 38400000u); // channel 15
+    a.w(Synth + 0x34, freq);
+    a.w(Bufc + 0x08, 2);                                 // BUF0: 256 B
+    a.w(Bufc + 0x0C, 0x20001000);
+    a.w(Bufc + 0x38, 3);                                 // BUF1: 512 B
+    a.w(Bufc + 0x3C, 0x20002000);
+    CHECK(state() == 0);
+    CHECK(a.r(Agc + 0x10) == 0x8000);                    // RSSI invalid while off
+
+    a.w(Rac + 0x08, 2);                                  // RXENSRCEN.SWRXEN
+    CHECK(state() == 1);                                 // held in RXWARM
+    auto lo_count = [&](std::uint32_t tuning) {
+        a.w(Synth + 0x4C, 16u << 11 | tuning);           // VCOTUNING
+        a.w(Synth + 0x2078, 1u << 9);                    // IF_CLR.LOCNTDONE
+        a.w(Synth + 0x88, 0x43);                         // LOCNTCTRL: NUMCYCLE 4, ENABLE, CLEAR
+        a.w(Synth + 0x88, 0x45);                         // RUN
+        CHECK((a.r(Synth + 0x78) & (1u << 9)) != 0);
+        return a.r(Synth + 0x8C) & 0x7ffff;
+    };
+    CHECK(lo_count(0x100) > freq >> 13 && lo_count(0x700) < freq >> 13); // open loop spans the channel
+    a.w(Synth + 0x0C, 1);                                // CMD.START: the loop locks
+    CHECK(lo_count(0x100) == freq >> 13);
+    a.w(Seq + 4, End);                                   // release RXWARM
+    CHECK(state() == 2);
+    const std::uint32_t rssi = a.r(Agc + 0x10);
+    CHECK(rssi != 0x8000 && static_cast<std::int32_t>(rssi << 16) >> 24 == -49); // -110 dBm + 61, quarter dB in 15:6
+
+    const std::vector<std::uint8_t> in = {0x41, 0x88, 0x07, 0xaa, 0xbb};
+    air.transmit("peer", {}, mcuemu::RadioProtocol::Zigbee802154, 15, a.chip.time_ns() + 1000, in);
+    a.chip.run(a.chip.core().cycles() + 38400);        // 1 ms
+    CHECK((a.r(Frc + 0x68) & (1u << 4)) != 0);           // FRC.IF.RXDONE
+    CHECK(a.r(Bufc + 0x58) == 7);                        // BUF1.STATUS: PHR + 5 + RSSI
+    std::uint8_t stored[7] = {};
+    a.chip.core().read_memory(0x20002000, stored, sizeof(stored));
+    const std::uint8_t expected[7] = {7, 0x41, 0x88, 0x07, 0xaa, 0xbb, 11}; // ideal medium: -50 dBm + 61
+    CHECK(std::memcmp(stored, expected, sizeof(expected)) == 0);
+
+    a.w(Rac + 0x08, 0);                                  // receiver off
+    CHECK(state() == 0);
+    a.w(Seq + 4 * 8, jump(8));                           // park TXWARM
+    a.w(Bufc + 0x30, 1);                                 // BUF0.CMD.CLEAR
+    for (std::uint8_t byte : {7, 0x41, 0x88, 0x09, 0xcc, 0xdd})
+        a.w(Bufc + 0x20, byte);                          // WRITEDATA
+    a.w(Rac + 0x10, 1);                                  // CMD.TXEN
+    CHECK(state() == 8);
+    const std::size_t sent = air.frames().size();
+    a.w(Seq + 4 * 8, End);                               // release TXWARM: the frame goes out
+    CHECK(state() == 9);
+    CHECK(air.frames().size() == sent + 1 && air.frames().back().channel == 15 &&
+          air.frames().back().payload == (std::vector<std::uint8_t>{0x41, 0x88, 0x09, 0xcc, 0xdd}));
+    CHECK((a.r(Frc + 0x68) & 1) == 0);
+    a.chip.run(a.chip.core().cycles() + 38400);
+    CHECK((a.r(Frc + 0x68) & 1) != 0);                   // FRC.IF.TXDONE
+    CHECK(state() == 0);                                 // TXPD not held: back to OFF
+}
+
 // The SEMAILBOX host answers a command once the words its TX_HEADER announces
 // have arrived (the handle word is not stored), with SUCCESS and no output.
 void test_efr32_semailbox_answers_commands() {

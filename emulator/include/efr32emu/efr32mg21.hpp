@@ -22,6 +22,7 @@ class Rtcc;
 class Ldma;
 class SeMailbox;
 class RailRegs;
+class RsmRadio;
 
 // What a pad does to its net, as seen from outside the chip.
 enum class PadDrive { HiZ, Low, High, PullUp, PullDown };
@@ -149,6 +150,8 @@ private:
     Ldma *ldma_{nullptr};
     std::unique_ptr<SeMailbox> se_mailbox_;
     std::unique_ptr<RailRegs> rail_regs_;
+    // The radio driven without RAIL (zigbee-rs efr32s2-hal); takes over from the RAIL path once active.
+    std::unique_ptr<RsmRadio> rsm_;
     // Core cycle of the end of the frame in flight, and of the ACK timeout after it.
     static constexpr std::uint64_t NoEvent = ~std::uint64_t{0};
     std::uint64_t tx_done_at_{NoEvent}, ack_timeout_at_{NoEvent};

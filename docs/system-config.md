@@ -482,7 +482,8 @@ behavior is inferred from the Zephyr driver and is not hardware-verified.
 - Pads: `tlsr8258` has `PA0`..`PE7`. `nrf52840` has `P0.00`..`P0.31` and
   `P1.00`..`P1.15`. `efr32mg21` has `PA0`..`PD15`. `esp32c6` has `GPIO0`..`GPIO30`, `esp32h2` `GPIO0`..`GPIO27` (plain GPIO and pull-ups; the GPIO matrix to other peripherals is not modelled). `phy6252` exposes `GPIO0`..`GPIO22` (plain GPIO, direction, pulls and basic interrupts; alternate pad functions are not modelled). `cc2530f256` has `P0.0`..`P0.7`, `P1.0`..`P1.7` and `P2.0`..`P2.4`, plus the input-only `RESET_N` (low holds the chip in reset, floating counts as high; not listed as a GPIO pad). Two falling edges on `P2.2` while `RESET_N` is low enter the debug interface: `P2.2` is then DC and `P2.1` DD, so another MCU or a script can program the chip over nets (see [cc2530.md](cc2530.md#debug-interface)). `ca51f253l3` has no GPIO model yet, so no pad can be wired.
 - UART: `uartN`. `tlsr8258` has `uart0`; `nrf52840` has `uart0`/`uart1` (UARTE0
-  and UARTE1); `efr32mg21` has none yet; `phy6252` and `stm32wb55` have polling
+  and UARTE1); `efr32mg21` has `uart0` (USART0: what the firmware transmits, and
+  receive into the LDMA ring the Silicon Labs NCP uses); `phy6252` and `stm32wb55` have polling
   `uart0` without interrupts; `esp32c6`/`esp32h2` have `uart0` (the console,
   with a receive FIFO and interrupts); `ca51f253l3` has `uart0`/`uart1` (transmit only), so a link to
   it is one-way and reports a warning. `cc2530f256` has `uart0`/`uart1` (USART0

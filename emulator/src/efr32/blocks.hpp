@@ -66,7 +66,13 @@ class Emu final : public RegBlock {
 public:
     static constexpr std::uint32_t Rstcause = 0x094;
     static constexpr std::uint32_t PowerOnReset = 1u << 0, SystemRequestReset = 1u << 6;
-    explicit Emu(Efr32mg21 &chip) : RegBlock(chip) { regs_[Rstcause >> 2] = PowerOnReset; }
+    // TEMP (+0x088): the die temperature in quarter kelvin (bits 10:0, GSDK EMU_TemperatureGet). INFERRED
+    // constant: 1193 is 25.1 C; the model has no thermal state.
+    static constexpr std::uint32_t Temp = 0x088, RoomTemperature = 1193;
+    explicit Emu(Efr32mg21 &chip) : RegBlock(chip) {
+        regs_[Rstcause >> 2] = PowerOnReset;
+        regs_[Temp >> 2] = RoomTemperature;
+    }
     // A reset the core asked for (SYSRESETREQ) is a system-request reset; any other reset is a
     // power-up.
     void reset() override;
@@ -132,10 +138,12 @@ public:
 // RTCC (0x48000000 secure, 0x58000000 non-secure alias). The Zephyr kernel tick
 // runs on the sleeptimer, which runs on this counter, so it has to count.
 // Counter: 32-bit, clocked at 32768 Hz (inferred: the LFXO/LFRCO clock is not
-// modelled) divided by 2^CFG.CNTPRESC, runs while EN and CMD.START are set.
-// Compare channel 1 in output-compare mode sets IF.CC1 when the counter reaches
-// OCVALUE + 1 (inferred from sl_sleeptimer_hal_rtcc.c, which programs
-// OCVALUE = target - 1 and says the match fires one tick later).
+// modelled) divided by 2^CFG.CNTPRESC, runs while EN and CMD.START are set;
+// STATUS.RUNNING (bit 0) reads set meanwhile. Compare channel n (0..2, CTRL at
+// +0x30 + 12n, OCVALUE 4 bytes later) in output-compare mode sets IF.CCn (bit
+// 2 + n) when the counter reaches OCVALUE + 1 (inferred from
+// sl_sleeptimer_hal_rtcc.c, which programs OCVALUE = target - 1 and says the
+// match fires one tick later). The counter wrapping to 0 sets IF.OF (bit 0).
 class Rtcc final : public RegBlock {
 public:
     static constexpr unsigned Irq = 10; // RTCC_IRQn
@@ -153,10 +161,37 @@ private:
     void arm();
     void update_irq();
 
-    // The counter is ticks_at_ at core cycle cycle_at_ while it runs; armed_tick_
-    // is the next compare match (Never when the channel is not armed).
-    std::uint64_t ticks_at_{0}, cycle_at_{0}, armed_tick_{Never};
+    static constexpr unsigned Channels = 3;
+    // The counter is ticks_at_ at core cycle cycle_at_ while it runs; armed_tick_[n]
+    // is channel n's next compare match (Never when the channel is not armed) and
+    // wrap_tick_ the next overflow.
+    std::uint64_t ticks_at_{0}, cycle_at_{0}, wrap_tick_{Never};
+    std::array<std::uint64_t, Channels> armed_tick_{Never, Never, Never};
     bool started_{false};
+};
+
+// TIMER0..3 (0x40048000 + 0x4000 n): the counter only, as the zigbee-rs HAL uses TIMER0 for its
+// busy-wait clock (efr32s2-hal delay.rs). CMD.START (bit 0) / STOP (bit 1) run and stop it while EN
+// (+0x30) bit 0 is set, STATUS.RUNNING (bit 0) follows, SYNCBUSY reads clear, and CNT (+0x24) counts
+// core cycles divided by CFG.PRESC + 1 (bits 27:18) up to TOP (+0x1C), then wraps to 0. TIMER0/1 are
+// 32-bit, TIMER2/3 16-bit (EFR32xG21 reference manual). INFERRED: the counter keeps counting while the
+// core sleeps (the model has no EM2 clock gating). Compare/capture channels, overflow flags and
+// interrupts are not modelled.
+class Timer final : public RegBlock {
+public:
+    Timer(Efr32mg21 &chip, std::uint32_t mask) : RegBlock(chip), mask_(mask) {}
+    std::uint32_t read(std::uint32_t reg) override;
+    void write(std::uint32_t reg, std::uint32_t value) override;
+    void reset() override;
+
+private:
+    std::uint32_t count(std::uint64_t at) const;
+    void freeze();
+
+    std::uint32_t mask_;
+    std::uint32_t count_at_{0};
+    std::uint64_t cycle_at_{0};
+    bool running_{false};
 };
 
 // USART0 (0x40058000), the console. Transmission is instantaneous: TXC, TXBL and
@@ -222,6 +257,9 @@ public:
     void reset() { words_.clear(); }
     // Direct access for the protimer model: plain stored value, no aliasing.
     std::uint32_t peek(std::uint32_t address) const;
+    // The stored value of the register `address` (set/clear/toggle alias addresses fold onto it), without the
+    // RAIL stand-in behaviour of read().
+    std::uint32_t stored(std::uint32_t address) const;
     void set_bits(std::uint32_t address, std::uint32_t mask);
     void clear_bits(std::uint32_t address, std::uint32_t mask);
     // True once after a write starts a transmit (RAC CMD.TXEN); the chip then
@@ -359,6 +397,12 @@ public:
     // Frames that ended on `channel` since the previous call, each as the RAIL RX
     // buffer holds it: PHR (payload plus the two FCS bytes), then the payload.
     std::vector<std::vector<std::uint8_t>> receive_fifo(std::uint8_t channel, std::uint64_t now_ns);
+    // Frames that ended on `channel` since the previous call and whose start-of-frame delimiter had not
+    // passed at `listening_since_ns` (the receiver was searching when they began), for RsmRadio.
+    std::vector<mcuemu::RadioFrame> receive_since(std::uint8_t channel, std::uint64_t now_ns,
+                                                  std::uint64_t listening_since_ns);
+    // The strongest frame of another node on `channel` at `at_ns` (dBm, -110 for a quiet channel).
+    std::int8_t energy_dbm(std::uint64_t at_ns, std::uint8_t channel) const;
 
 private:
     enum class State : std::uint32_t { Off = 0, Idle = 1, Rx = 2, Tx = 3 };
@@ -384,7 +428,75 @@ private:
     std::int8_t rx_rssi_{-127};
     std::uint64_t tx_end_ns_{0};
     bool tx_active_{false};
-    std::uint64_t rx_start_ns_{0}, last_poll_ns_{0}, rail_poll_ns_{0};
+    std::uint64_t rx_start_ns_{0}, last_poll_ns_{0}, rail_poll_ns_{0}, rsm_poll_ns_{0};
+};
+
+// The radio as the zigbee-rs `efr32s2-hal` driver runs it (efr32s2-hal/src/radio, xg21.rs): no RAIL
+// and no sequencer microcode. The driver clock-gates nothing on xG21; it loads its own 16-slot compact
+// vector table into sequencer RAM where every slot is END except the warm states, which it parks on a
+// self-JUMP while it calibrates the synthesizer, then releases by writing END over the jump. The model
+// takes over the radio registers once the firmware has loaded such a table (RAC.SEQCTRL.COMPACT with
+// RAC.VECTADDR at sequencer RAM and only END/self-JUMP slots); RAIL images never do, so they keep the
+// RAIL path in efr32mg21.cpp. What it implements, on the registers the driver uses (secure view):
+//
+//   RAC.STATUS.STATE (+0x0C, bits 27:24): OFF 0, RXWARM 1, RXSEARCH 2, RXOVERFLOW 6, TXWARM 8, TX 9,
+//     TXPD 10. RXENSRCEN (+0x08) != 0 starts RX, 0 stops it; CMD (+0x10) TXEN (bit 0) starts TX,
+//     CLEARRXOVERFLOW (bit 6) leaves RXOVERFLOW. A state whose vector slot is a self-JUMP is held there.
+//   TX: the frame is BUF0's bytes from READOFFSET (PHR, then the PSDU without FCS); it goes on air when
+//     TXWARM is released and FRC.IF.TXDONE (bit 0) is set when it ends, then the RSM enters TXPD.
+//   RX: each frame heard while searching goes into BUF1 as [PHR][PSDU - FCS][RSSI] at WRITEOFFSET
+//     (wrapping at 64 << CTRL.SIZE bytes; the offsets count modulo 8 KiB), STATUS is WRITEOFFSET -
+//     READOFFSET, and FRC.IF.RXDONE (bit 4) is set; a frame that does not fit sets FRC.IF.RXOF (bit 8)
+//     and RXOVERFLOW. BUFn.CMD.CLEAR empties a buffer. FRC (IRQ 34) follows FRC.IF & FRC.IEN.
+//   AGC.RSSI (+0x10): the channel energy in quarter dB in bits 15:6 while searching, 0x8000 (invalid)
+//     otherwise.
+//   SYNTH: CMD (+0x0C) START/STOP and ENABLEIF/DISABLEIF; LOCNTCTRL (+0x88) RUN sets IF.LOCNTDONE
+//     (bit 9) and LOCNTSTATUS (+0x8C) holds the LO count over 2^NUMCYCLE reference periods. With the
+//     loop started the LO is FREQ (+0x34) plus or minus IFFREQ (+0x38), as the driver computes its
+//     target; open loop it falls linearly with VCOTUNING (+0x4C, bits 10:0) from 2.52 to 2.36 GHz.
+//   RAC.RFSTATUS.MODRAMPUPDONE (+0x98 bit 0) follows RAC.PAENCTRL.PARAMP (+0xA4 bit 8).
+//
+// INFERRED, not the silicon: the open-loop VCO curve, a loop that always locks, instant LO counts,
+// warm-up and RX-to-search times of zero (the driver's own waits pace it), the RSSI scale (61 dB above
+// the antenna level, the -50 dB chip term plus the -11 dB board offset the driver subtracts), and no
+// RAC.IF.STATECHANGE interrupt (the driver's RAC_RSM handler only acknowledges it). Frames are not
+// address-filtered (the driver filters and acknowledges in software) and RXFRAME is not reported.
+class RsmRadio final {
+public:
+    RsmRadio(Efr32mg21 &chip, RailRegs &regs, Radio &air) : chip_(chip), regs_(regs), air_(air) {}
+    bool active() const noexcept { return active_; }
+    void reset();
+    // After RailRegs stored a firmware write to `address` (secure view, alias bits kept).
+    void written(std::uint32_t address, std::uint32_t value);
+    // The value of a register with behaviour; false for plain registers.
+    bool read(std::uint32_t address, std::uint32_t &value);
+    // Advances to `now` (core cycles); returns the next cycle that needs a service.
+    std::uint64_t service(std::uint64_t now);
+
+private:
+    enum State : std::uint32_t { Off = 0, RxWarm = 1, RxSearch = 2, RxOverflow = 6, TxWarm = 8, Tx = 9, TxPd = 10 };
+
+    void check_vector_table();
+    bool held(State state) const;
+    void enter(State state, std::uint64_t now);
+    void advance(std::uint64_t now);
+    void poll(std::uint64_t now);
+    void deliver(const mcuemu::RadioFrame &frame);
+    void start_transmit(std::uint64_t now);
+    std::uint8_t channel() const;
+    std::uint32_t lo_count() const;
+    void clear_buffer(std::uint32_t buffer);
+    void update_irq();
+    std::uint64_t now() const;
+
+    Efr32mg21 &chip_;
+    RailRegs &regs_;
+    Radio &air_;
+    bool active_{false};
+    State state_{Off};
+    std::uint64_t tx_end_{Never}, next_poll_{Never}, listening_since_ns_{0};
+    bool synth_running_{false}, synth_if_{false};
+    std::uint32_t locnt_{0};
 };
 
 } // namespace efr32emu

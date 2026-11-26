@@ -34,7 +34,7 @@ devices:
 
 attach:
   - { endpoint: air0, sink: "pcap:efr-air.pcap" }
-  - { endpoint: board.mcu.rtt, sink: "text" }
+  - { endpoint: board.mcu.uart0, sink: "text" }
   - { endpoint: board.led0, sink: "file:led.log" }
 
 scenario:

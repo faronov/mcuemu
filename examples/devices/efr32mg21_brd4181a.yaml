@@ -4,14 +4,13 @@
 #   mcu.PB0  -> LED0   (high = lit)
 #   mcu.PD2  <- BTN0   (the WSTK provides the pull-up, low = pressed)
 #
-# The image reads synthetic temperature and humidity and a fixed battery, so no
-# sensor is wired. Short press toggles join/leave, a 3 s hold requests a factory
-# reset.
+# The image reads the die temperature (EMU), a synthetic humidity and a fixed
+# battery, so no sensor is wired. Short press toggles join/leave, a 3 s hold
+# requests a factory reset. It logs on the WSTK virtual COM port (USART0 TX on
+# PA5, 115200 8N1): the endpoint `<id>.mcu.uart0`.
 #
 # The firmware is not in the repository: pass `firmware` or copy it to the
-# default path (see examples/README.md). `rtt_address` is the `_SEGGER_RTT`
-# control block of that image; it moves with every build (find it by searching
-# RAM for "SEGGER RTT" after a short run, or from the ELF).
+# default path (see examples/README.md).
 version: 1
 
 params:
@@ -21,7 +20,6 @@ params:
   tx_power_dbm: 0
   led_pin: PB0
   button_pin: PD2
-  rtt_address: 0x20004a18
 
 device:
   id: brd4181a
@@ -29,7 +27,6 @@ device:
     - id: mcu
       model: efr32mg21
       firmware: "${firmware}"
-      rtt: { address: "${rtt_address}" }
       radio:
         air: "${air}"
         position: "${position}"

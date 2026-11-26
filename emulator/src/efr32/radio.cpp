@@ -7,7 +7,8 @@
 // the zigbee-rs `efr32s2` MAC driver (zigbee-mac/src/efr32s2/driver.rs), whose
 // own header calls it a scaffold with unverified register values. It exists so
 // that driver's firmware can run in a network; firmware built on RAIL or the
-// GSDK radio stack will not work.
+// GSDK radio stack will not work. Current zigbee-rs images use the efr32s2-hal
+// driver instead, modelled by RsmRadio (rsm.cpp).
 //
 // Interface (offsets from 0x40090000):
 //   FRC   0x0000: IF at +0x30 (bit 4: CRC ok), IFC at +0x38
@@ -63,12 +64,15 @@ void Radio::reset() {
     rx_read_ = 0;
     rx_pending_ = tx_active_ = false;
     rx_rssi_ = -127;
+    rsm_poll_ns_ = 0;
     update_irq();
 }
 
 void Radio::update_irq() { set_irq_level(FrcPriIrq, (rac_if_ & rac_ien_) != 0); }
 
-std::int8_t Radio::energy_dbm(std::uint64_t at_ns) const {
+std::int8_t Radio::energy_dbm(std::uint64_t at_ns) const { return energy_dbm(at_ns, channel()); }
+
+std::int8_t Radio::energy_dbm(std::uint64_t at_ns, std::uint8_t channel) const {
     if (!air_)
         return -110;
     double best = -110;
@@ -77,7 +81,7 @@ std::int8_t Radio::energy_dbm(std::uint64_t at_ns) const {
     for (auto it = frames.rbegin(); it != frames.rend(); ++it) {
         if (it->end_ns + 20000000ull < at_ns)
             break;
-        if (it->protocol != mcuemu::RadioProtocol::Zigbee802154 || it->channel != channel() ||
+        if (it->protocol != mcuemu::RadioProtocol::Zigbee802154 || it->channel != channel ||
             it->source == node_ || it->start_ns > at_ns || it->end_ns + 128000 < at_ns)
             continue;
         best = std::max(best, ideal ? -50.0 : it->tx_power_dbm - air_->path_loss_db(it->source, node_));
@@ -179,6 +183,22 @@ std::vector<std::vector<std::uint8_t>> Radio::receive_fifo(std::uint8_t channel,
         frames.push_back(std::move(fifo));
     }
     return frames;
+}
+
+std::vector<mcuemu::RadioFrame> Radio::receive_since(std::uint8_t channel, std::uint64_t now_ns,
+                                                     std::uint64_t listening_since_ns) {
+    std::vector<mcuemu::RadioFrame> heard;
+    if (!air_)
+        return heard;
+    const std::uint64_t after = rsm_poll_ns_;
+    rsm_poll_ns_ = now_ns;
+    for (mcuemu::RadioFrame &frame :
+         air_->receive(node_, mcuemu::RadioProtocol::Zigbee802154, channel, now_ns, after)) {
+        if (frame.start_ns + SfdNs < listening_since_ns || frame.payload.size() + 2 > 127)
+            continue; // the receiver was not searching when the frame began, or no valid PHR
+        heard.push_back(std::move(frame));
+    }
+    return heard;
 }
 
 void Radio::begin_transmit() {
