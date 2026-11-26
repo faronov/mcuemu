@@ -173,10 +173,11 @@ private:
 // TIMER0..3 (0x40048000 + 0x4000 n): the counter only, as the zigbee-rs HAL uses TIMER0 for its
 // busy-wait clock (efr32s2-hal delay.rs). CMD.START (bit 0) / STOP (bit 1) run and stop it while EN
 // (+0x30) bit 0 is set, STATUS.RUNNING (bit 0) follows, SYNCBUSY reads clear, and CNT (+0x24) counts
-// core cycles divided by CFG.PRESC + 1 (bits 27:18) up to TOP (+0x1C), then wraps to 0. TIMER0/1 are
-// 32-bit, TIMER2/3 16-bit (EFR32xG21 reference manual). INFERRED: the counter keeps counting while the
-// core sleeps (the model has no EM2 clock gating). Compare/capture channels, overflow flags and
-// interrupts are not modelled.
+// core cycles divided by CFG.PRESC + 1 (bits 27:18) up to TOP (+0x1C), then wraps to 0. TIMER0 is
+// 32-bit, TIMER1..3 16-bit (efr32mg21a010f1024im32.h TIMERn_CNTWIDTH), and TOP resets to 0xFFFF on
+// every timer (_TIMER_TOP_RESETVALUE), so a 32-bit count needs TOP written. INFERRED: the counter
+// keeps counting while the core sleeps (the model has no EM2 clock gating). Compare/capture channels,
+// overflow flags and interrupts are not modelled.
 class Timer final : public RegBlock {
 public:
     Timer(Efr32mg21 &chip, std::uint32_t mask) : RegBlock(chip), mask_(mask) {}

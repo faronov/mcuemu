@@ -115,7 +115,7 @@ Efr32mg21::Efr32mg21() {
     blocks_[DpllSlot] = std::make_unique<Dpll>(*this);
     blocks_[UsartSlot] = std::make_unique<Usart>(*this);
     for (unsigned timer = 0; timer < 4; ++timer)
-        blocks_[Timer0Slot + timer] = std::make_unique<Timer>(*this, timer < 2 ? 0xffffffffu : 0xffffu);
+        blocks_[Timer0Slot + timer] = std::make_unique<Timer>(*this, timer == 0 ? 0xffffffffu : 0xffffu);
     blocks_[MscSlot] = std::make_unique<Msc>(*this);
     auto ldma = std::make_unique<Ldma>(*this);
     ldma_ = ldma.get();

@@ -312,12 +312,17 @@ void test_efr32_rtcc_cc0_running_and_overflow() {
 }
 
 // TIMER0 counts core cycles divided by CFG.PRESC + 1 while started (the zigbee-rs HAL's
-// busy-wait clock); TIMER2 is 16 bits wide.
+// busy-wait clock). TOP resets to 0xFFFF on every timer; only TIMER0 is 32 bits wide.
 void test_efr32_timer_counts() {
     Chip c;
+    CHECK(c.r(0x4004801c) == 0xffff);   // TIMER0.TOP
+    CHECK(c.r(0x4004c01c) == 0xffff);   // TIMER1.TOP
     c.w(0x4004800c, 1);      // START without EN: stays stopped
     CHECK((c.r(0x40048010) & 1) == 0);
     c.w(0x40048030, 1);      // EN
+    c.w(0x4004801c, 0xffffffffu); // TOP: the full 32-bit range, as the HAL sets it
+    CHECK(c.r(0x4004801c) == 0xffffffffu);
+    c.w(0x40048024, 0xfffff000u);
     c.w(0x4004800c, 1);      // CMD.START
     CHECK((c.r(0x40048010) & 1) == 1);
     const std::uint32_t first = c.r(0x40048024);
@@ -331,11 +336,13 @@ void test_efr32_timer_counts() {
     const std::uint32_t stopped = c.r(0x40048024);
     c.chip.core().advance_to(c.chip.core().cycles() + 1000);
     CHECK(c.r(0x40048024) == stopped && (c.r(0x40048010) & 1) == 0);
-    c.w(0x40050030, 1);      // TIMER2: EN, CNT near the 16-bit top, START
-    c.w(0x40050024, 0xfff0);
-    c.w(0x4005000c, 1);
+    c.w(0x4004c030, 1);      // TIMER1: TOP keeps 16 bits; CNT wraps at 0x10000
+    c.w(0x4004c01c, 0xffffffffu);
+    CHECK(c.r(0x4004c01c) == 0xffff);
+    c.w(0x4004c024, 0xfff0);
+    c.w(0x4004c00c, 1);
     c.chip.core().advance_to(c.chip.core().cycles() + 0x20);
-    CHECK(c.r(0x40050024) == 0x10);
+    CHECK(c.r(0x4004c024) == 0x10);
 }
 
 // The radio as the zigbee-rs efr32s2-hal driver runs it (RsmRadio): a vector table of END slots

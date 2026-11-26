@@ -190,6 +190,7 @@ namespace {
 constexpr std::uint32_t TimerCfg = 0x004, TimerCmd = 0x00c, TimerStatus = 0x010, TimerTop = 0x01c,
                         TimerCnt = 0x024, TimerEn = 0x030;
 constexpr std::uint32_t TimerCmdStart = 1u << 0, TimerCmdStop = 1u << 1, TimerStatusRunning = 1u << 0;
+constexpr std::uint32_t TimerTopReset = 0xffff; // _TIMER_TOP_RESETVALUE, on the 32-bit TIMER0 too
 } // namespace
 
 std::uint32_t Timer::count(std::uint64_t at) const {
@@ -234,9 +235,12 @@ void Timer::write(std::uint32_t reg, std::uint32_t value) {
         RegBlock::write(reg, value);
         return;
     case TimerCfg:
-    case TimerTop:
         freeze();
         RegBlock::write(reg, value);
+        return;
+    case TimerTop:
+        freeze();
+        RegBlock::write(reg, value & mask_);
         return;
     default: RegBlock::write(reg, value); return;
     }
@@ -244,7 +248,7 @@ void Timer::write(std::uint32_t reg, std::uint32_t value) {
 
 void Timer::reset() {
     RegBlock::reset();
-    regs_[TimerTop >> 2] = mask_;
+    regs_[TimerTop >> 2] = TimerTopReset;
     count_at_ = 0;
     cycle_at_ = 0;
     running_ = false;
