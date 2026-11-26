@@ -74,9 +74,10 @@ modelled, each for the firmware that uses it:
 
 Frames go through the shared `mcuemu::VirtualAir` as 802.15.4 MAC frames
 without the FCS (timed with it, so a frame lasts as long on air as on a real
-radio). The receivers poll the medium (every 16 us for the zigbee-rs paths, 100
-us for RAIL) and can lock on a frame whose start-of-frame delimiter has not
-passed (128 us), as in the nRF52840 model. All of this timing is inferred.
+radio). The zigbee-rs receivers poll the medium every 16 us and take a frame
+whose start-of-frame delimiter had not passed (128 us) when they started
+listening, as in the nRF52840 model; the RAIL path polls every 100 us. All of
+this timing is inferred.
 
 ## Board: BRD4181A
 
