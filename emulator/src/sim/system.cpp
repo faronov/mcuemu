@@ -12,7 +12,6 @@
 #include "sim/tlsr826x_mcu.hpp"
 
 #include <functional>
-#include <tuple>
 #include <algorithm>
 #include <cstdint>
 #include <deque>
@@ -207,10 +206,19 @@ const McuRegistry &McuRegistry::builtin() {
                 mcu->chip().set_device_id(*config.eui64);
             return mcu;
         });
-        for (const auto &[model, variant, mhz] :
-             {std::tuple{"esp32c6", esp32emu::Variant::C6, "160"}, std::tuple{"esp32h2", esp32emu::Variant::H2, "96"}}) {
-            r.add(model, [model = std::string(model), variant, mhz = std::string(mhz)](const McuConfig &config,
-                                                                                         const std::string &name) {
+        // Named locals instead of structured bindings over a braced list: MSVC 19.52 rejects both the
+        // range (C2228) and init-captures that name a binding (C3493).
+        struct Esp32Model {
+            const char *model;
+            esp32emu::Variant variant;
+            const char *mhz;
+        };
+        const Esp32Model esp32_models[] = {{"esp32c6", esp32emu::Variant::C6, "160"},
+                                           {"esp32h2", esp32emu::Variant::H2, "96"}};
+        for (const Esp32Model &entry : esp32_models) {
+            const std::string model = entry.model, mhz = entry.mhz;
+            const esp32emu::Variant variant = entry.variant;
+            r.add(model, [model, variant, mhz](const McuConfig &config, const std::string &name) {
                 if (config.variant)
                     throw std::invalid_argument(model + " has no variants; remove 'variant'");
                 if (config.clock_hz)

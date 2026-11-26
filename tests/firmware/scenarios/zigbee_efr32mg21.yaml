@@ -1,11 +1,8 @@
 # CI scenario: the zigbee-rs EFR32MG21 sensor (BRD4181A) joins the sampleGW
 # coordinator, finishes the trust-center link key exchange and sends
-# measurement reports. The log is printed from board.mcu.rtt. Checked by
-# zigbee_air_check.py.
-#
-# rtt_address is the `_SEGGER_RTT` symbol of the image; it moves with every
-# build, so the workflow rewrites the line below from the ELF (the value here
-# belongs to the image the model was developed with).
+# measurement reports. The image logs on the WSTK virtual COM port (USART0,
+# `board.mcu.uart0`), which zigbee_air_check.py prints with --trace-uart and
+# checks.
 version: 1
 
 world:
@@ -31,7 +28,6 @@ devices:
     params:
       position: [4, 0, 1]
       firmware: ../../firmware/efr32mg21-sensor.bin
-      rtt_address: 0x20004a18
 
 scenario:
   events:
@@ -42,5 +38,4 @@ scenario:
 
 attach:
   - { endpoint: air0, sink: "pcap:air.pcap" }
-  - { endpoint: board.mcu.rtt, sink: "text" }
   - { endpoint: board.led0, sink: "file:led.log" }

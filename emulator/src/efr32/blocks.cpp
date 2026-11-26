@@ -137,6 +137,7 @@ bool Ldma::usart0_rx(std::uint8_t byte) {
 void Emu::reset() {
     RegBlock::reset();
     regs_[Rstcause >> 2] = chip().soft_reset() ? SystemRequestReset : PowerOnReset;
+    regs_[Temp >> 2] = RoomTemperature;
 }
 
 void Cmu::reset() {
@@ -181,6 +182,76 @@ std::uint32_t Dpll::read(std::uint32_t reg) {
     if (reg == DpllStatus)
         return enabled ? (1u | 2u | (1u << 31)) : 0u; // RDY, ENS, LOCK
     return RegBlock::read(reg);
+}
+
+// ---- TIMER -----------------------------------------------------------------------
+
+namespace {
+constexpr std::uint32_t TimerCfg = 0x004, TimerCmd = 0x00c, TimerStatus = 0x010, TimerTop = 0x01c,
+                        TimerCnt = 0x024, TimerEn = 0x030;
+constexpr std::uint32_t TimerCmdStart = 1u << 0, TimerCmdStop = 1u << 1, TimerStatusRunning = 1u << 0;
+constexpr std::uint32_t TimerTopReset = 0xffff; // _TIMER_TOP_RESETVALUE, on the 32-bit TIMER0 too
+} // namespace
+
+std::uint32_t Timer::count(std::uint64_t at) const {
+    if (!running_ || at <= cycle_at_)
+        return count_at_;
+    const std::uint64_t divisor = ((regs_[TimerCfg >> 2] >> 18) & 0x3ffu) + 1u;
+    const std::uint64_t top = (regs_[TimerTop >> 2] & mask_) + 1ull;
+    return static_cast<std::uint32_t>((count_at_ + (at - cycle_at_) / divisor) % top);
+}
+
+void Timer::freeze() {
+    const std::uint64_t n = now();
+    count_at_ = count(n);
+    cycle_at_ = n;
+}
+
+std::uint32_t Timer::read(std::uint32_t reg) {
+    if (reg == TimerCnt)
+        return count(now());
+    if (reg == TimerStatus)
+        return running_ ? TimerStatusRunning : 0u;
+    return RegBlock::read(reg);
+}
+
+void Timer::write(std::uint32_t reg, std::uint32_t value) {
+    switch (reg) {
+    case TimerCmd:
+        freeze();
+        if ((value & TimerCmdStart) && (regs_[TimerEn >> 2] & 1u))
+            running_ = true;
+        if (value & TimerCmdStop)
+            running_ = false;
+        return;
+    case TimerCnt:
+        freeze();
+        count_at_ = value & mask_;
+        return;
+    case TimerEn:
+        freeze();
+        if (!(value & 1u))
+            running_ = false;
+        RegBlock::write(reg, value);
+        return;
+    case TimerCfg:
+        freeze();
+        RegBlock::write(reg, value);
+        return;
+    case TimerTop:
+        freeze();
+        RegBlock::write(reg, value & mask_);
+        return;
+    default: RegBlock::write(reg, value); return;
+    }
+}
+
+void Timer::reset() {
+    RegBlock::reset();
+    regs_[TimerTop >> 2] = TimerTopReset;
+    count_at_ = 0;
+    cycle_at_ = 0;
+    running_ = false;
 }
 
 // ---- USART -----------------------------------------------------------------------
@@ -406,6 +477,8 @@ std::uint32_t RailRegs::peek(std::uint32_t address) const {
     return it != words_.end() ? it->second : 0;
 }
 
+std::uint32_t RailRegs::stored(std::uint32_t address) const { return peek(register_base(address)); }
+
 void RailRegs::set_bits(std::uint32_t address, std::uint32_t mask) { words_[address] |= mask; }
 
 void RailRegs::clear_bits(std::uint32_t address, std::uint32_t mask) { words_[address] &= ~mask; }
@@ -458,12 +531,16 @@ bool RailRegs::take_tx_start() {
 // ---- RTCC ------------------------------------------------------------------------
 
 namespace {
-constexpr std::uint32_t RtccEn = 0x004, RtccCfg = 0x008, RtccCmd = 0x00c, RtccIf = 0x014, RtccIen = 0x018,
-                        RtccCnt = 0x020, RtccCombcnt = 0x024, RtccCc1Ctrl = 0x03c, RtccCc1Ocvalue = 0x040;
-constexpr std::uint32_t RtccCmdStart = 1u << 0, RtccCmdStop = 1u << 1, RtccIfCc1 = 1u << 3;
+constexpr std::uint32_t RtccEn = 0x004, RtccCfg = 0x008, RtccCmd = 0x00c, RtccStatus = 0x010, RtccIf = 0x014,
+                        RtccIen = 0x018, RtccCnt = 0x020, RtccCombcnt = 0x024, RtccCc0Ctrl = 0x030;
+constexpr std::uint32_t RtccCmdStart = 1u << 0, RtccCmdStop = 1u << 1, RtccStatusRunning = 1u << 0, RtccIfOf = 1u << 0;
 constexpr std::uint64_t RtccWrap = 1ull << 32, RtccTickHz = 32768;
 // CNTPRESC above DIV64 is not a valid setting; clamping keeps the cycle arithmetic in 64 bits.
 constexpr unsigned RtccMaxPresc = 6;
+constexpr std::uint32_t rtcc_cc_ctrl(unsigned channel) { return RtccCc0Ctrl + 12u * channel; }
+constexpr std::uint32_t rtcc_cc_ocvalue(unsigned channel) { return rtcc_cc_ctrl(channel) + 4u; }
+// IF.CCn of the EFR32MG21 (CC0..CC2 at bits 2..4; efr32mg21_rtcc.h).
+constexpr std::uint32_t rtcc_if_cc(unsigned channel) { return 1u << (2u + channel); }
 } // namespace
 
 bool Rtcc::counting() const { return started_ && (regs_[RtccEn >> 2] & 1u); }
@@ -495,18 +572,24 @@ void Rtcc::freeze() {
 }
 
 void Rtcc::arm() {
-    if (!counting() || (regs_[RtccCc1Ctrl >> 2] & 3u) != 2u) { // OUTPUTCOMPARE
-        armed_tick_ = Never;
-        return;
+    std::uint64_t next = Never;
+    for (unsigned channel = 0; channel < Channels; ++channel) {
+        armed_tick_[channel] = Never;
+        if (!counting() || (regs_[rtcc_cc_ctrl(channel) >> 2] & 3u) != 2u) // OUTPUTCOMPARE
+            continue;
+        // Match when the counter reaches OCVALUE + 1 (32-bit). A target equal to the
+        // current count is taken as a full wrap away, not as an immediate match.
+        const auto target = static_cast<std::uint32_t>(regs_[rtcc_cc_ocvalue(channel) >> 2] + 1u);
+        std::uint64_t delta = static_cast<std::uint32_t>(target - static_cast<std::uint32_t>(ticks_at_));
+        if (delta == 0)
+            delta = RtccWrap;
+        armed_tick_[channel] = ticks_at_ + delta;
+        next = std::min(next, armed_tick_[channel]);
     }
-    // Match when the counter reaches OCVALUE + 1 (32-bit). A target equal to the
-    // current count is taken as a full wrap away, not as an immediate match.
-    const auto target = static_cast<std::uint32_t>(regs_[RtccCc1Ocvalue >> 2] + 1u);
-    std::uint64_t delta = static_cast<std::uint32_t>(target - static_cast<std::uint32_t>(ticks_at_));
-    if (delta == 0)
-        delta = RtccWrap;
-    armed_tick_ = ticks_at_ + delta;
-    chip().request_service(cycle_for(armed_tick_));
+    wrap_tick_ = counting() ? (ticks_at_ | (RtccWrap - 1)) + 1 : Never;
+    next = std::min(next, wrap_tick_);
+    if (next != Never)
+        chip().request_service(cycle_for(next));
 }
 
 void Rtcc::update_irq() { set_irq_level(Irq, (regs_[RtccIf >> 2] & regs_[RtccIen >> 2]) != 0); }
@@ -514,12 +597,13 @@ void Rtcc::update_irq() { set_irq_level(Irq, (regs_[RtccIf >> 2] & regs_[RtccIen
 std::uint32_t Rtcc::read(std::uint32_t reg) {
     if (reg == RtccCnt || reg == RtccCombcnt)
         return static_cast<std::uint32_t>(ticks(now()));
+    if (reg == RtccStatus)
+        return (RegBlock::read(reg) & ~RtccStatusRunning) | (counting() ? RtccStatusRunning : 0u);
     return RegBlock::read(reg);
 }
 
 void Rtcc::write(std::uint32_t reg, std::uint32_t value) {
-    switch (reg) {
-    case RtccCmd:
+    if (reg == RtccCmd) {
         freeze();
         if (value & RtccCmdStart)
             started_ = true;
@@ -527,49 +611,67 @@ void Rtcc::write(std::uint32_t reg, std::uint32_t value) {
             started_ = false;
         arm();
         return;
-    case RtccCnt:
+    }
+    if (reg == RtccCnt) {
         freeze();
         ticks_at_ = value;
         arm();
         return;
-    case RtccEn:
-    case RtccCfg:
-    case RtccCc1Ctrl:
-    case RtccCc1Ocvalue:
+    }
+    if (reg == RtccIf || reg == RtccIen) {
+        RegBlock::write(reg, value);
+        update_irq();
+        return;
+    }
+    const bool compare = reg >= rtcc_cc_ctrl(0) && reg < rtcc_cc_ctrl(Channels) && (reg - rtcc_cc_ctrl(0)) % 12u != 8u;
+    if (reg == RtccEn || reg == RtccCfg || compare) {
         freeze();
         RegBlock::write(reg, value);
         arm();
         return;
-    case RtccIf:
-    case RtccIen:
-        RegBlock::write(reg, value);
-        update_irq();
-        return;
-    default:
-        RegBlock::write(reg, value);
-        return;
     }
+    RegBlock::write(reg, value);
 }
 
 std::uint64_t Rtcc::service(std::uint64_t) {
-    if (!counting() || armed_tick_ == Never)
+    if (!counting())
         return Never;
     freeze();
-    if (ticks_at_ >= armed_tick_) {
-        regs_[RtccIf >> 2] |= RtccIfCc1;
-        do {
-            armed_tick_ += RtccWrap;
-        } while (armed_tick_ <= ticks_at_);
+    bool changed = false;
+    if (ticks_at_ >= wrap_tick_) {
+        regs_[RtccIf >> 2] |= RtccIfOf;
+        changed = true;
+    }
+    for (unsigned channel = 0; channel < Channels; ++channel) {
+        if (armed_tick_[channel] == Never || ticks_at_ < armed_tick_[channel])
+            continue;
+        regs_[RtccIf >> 2] |= rtcc_if_cc(channel);
+        changed = true;
+    }
+    if (changed) {
+        // Re-arm from the current count: each match fires again one counter wrap later.
+        std::array<std::uint64_t, Channels> fired = armed_tick_;
+        arm();
+        for (unsigned channel = 0; channel < Channels; ++channel) {
+            if (fired[channel] != Never && ticks_at_ >= fired[channel] && armed_tick_[channel] != Never) {
+                while (armed_tick_[channel] <= ticks_at_)
+                    armed_tick_[channel] += RtccWrap;
+            }
+        }
         update_irq();
     }
-    return cycle_for(armed_tick_);
+    std::uint64_t next = wrap_tick_;
+    for (const std::uint64_t tick : armed_tick_)
+        next = std::min(next, tick);
+    return next == Never ? Never : cycle_for(next);
 }
 
 void Rtcc::reset() {
     RegBlock::reset();
     ticks_at_ = 0;
     cycle_at_ = 0;
-    armed_tick_ = Never;
+    wrap_tick_ = Never;
+    armed_tick_.fill(Never);
     started_ = false;
     update_irq();
 }

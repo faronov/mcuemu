@@ -12,7 +12,7 @@
 | `devices/lywsd03mmc_v15.yaml` | LYWSD03MMC with the UART display (38400 baud, TX PD7) and an SHT4x sensor; the display frames are logged, not decoded. |
 | `devices/nrf52840_promicro.yaml` | An nRF52840 on a Pro Micro-style board (nice!nano v2 pins): status LED P0.15, button P0.11; everything else on the header is free to wire. |
 | `nrf52840_promicro.yaml` | The board running the Embassy Zigbee sensor image on its own, with a button press from the scenario (it scans and finds nothing). |
-| `devices/efr32mg21_brd4181a.yaml` | An EFR32MG21 on the BRD4181A radio board: LED0 on PB0, BTN0 on PD2, RTT. |
+| `devices/efr32mg21_brd4181a.yaml` | An EFR32MG21 on the BRD4181A radio board: LED0 on PB0, BTN0 on PD2, the VCOM console on `uart0` (USART0). |
 | `efr32mg21_zigbee.yaml` | The board with the zigbee-rs sensor image on one medium with the TLSR8258 sampleGW coordinator: the EFR32 joins, completes the TCLK exchange and reports. The radio is not the silicon's (`docs/efr32mg21.md`). |
 | `nrf52840_zigbee.yaml` | The same board with the SHT31 image on one radio medium with the TLSR8258 sampleGW coordinator: the nRF52840 joins the network, completes the TCLK exchange and reports temperature and humidity read from a simulated SHT31 on P0.26/P0.27. Different chips and cores in one world. |
 | `cc2530_zigbee.yaml` | A CC2530F256 with the standard Z-Stack DIYRuZ Motion Router image on one medium with the TLSR8258 sampleGW coordinator: the router joins, gets the network key, announces itself and exchanges link status. It is powered on after the coordinator has formed its network (the image scans once and does not rescan). |

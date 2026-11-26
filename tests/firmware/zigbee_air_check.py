@@ -10,8 +10,12 @@ goes over the air (a pcap written by a `pcap:` sink, link type 230, IEEE
 * after that the new device sends NWK data frames (--min-up; --min-unicast asks
   for frames addressed to a node, not broadcasts such as Device Announce) and the
   coordinator sends NWK data frames to it (the key, the interview, ...);
-* optionally, more unicast uplink frames after a given virtual time (periodic reports)
-  and regexes that must appear in the console (--expect, e.g. the RTT log).
+* optionally, more unicast uplink frames after a given virtual time (periodic reports),
+  one active scan of at least N channels before the join (--min-scan-burst: the
+  longest run of MAC beacon requests less than --scan-burst-gap apart; an active scan
+  sends one per channel, so 16 is a full 11..26 sweep, while separate shorter sweeps
+  do not add up; the capture has no channel field) and regexes that must appear in
+  the console (--expect, e.g. the RTT log).
 
 UART and RTT output goes to the console through the system file's own sinks
 (`--trace-uart '*=text'` is added unless --no-uart-trace is given); the whole
@@ -112,6 +116,8 @@ def analyse(
     min_down: int,
     late_after_ns: int,
     min_late: int,
+    min_scan_burst: int = 0,
+    scan_burst_gap_ns: int = 200_000_000,
 ):
     problems: list[str] = []
     joined_at = short = None
@@ -123,6 +129,15 @@ def analyse(
                 break
     if short is None:
         return ["no successful association response in the capture"], {}
+    # MAC command 0x07 (beacon request) before the association response, grouped into scans.
+    scan_burst = burst = 0
+    previous = None
+    for f in frames:
+        if f.t_ns >= joined_at or f.kind != 3 or f.payload[:1] != b"\x07":
+            continue
+        burst = burst + 1 if previous is not None and f.t_ns - previous < scan_burst_gap_ns else 1
+        scan_burst = max(scan_burst, burst)
+        previous = f.t_ns
     up = unicast = down = late = 0
     for f in frames:
         if f.t_ns < joined_at:
@@ -139,7 +154,10 @@ def analyse(
                     late += 1
         if dst == short and src == 0:
             down += 1
-    stats = {"short": short, "joined_at_s": joined_at / 1e9, "up": up, "unicast": unicast, "down": down, "late": late}
+    stats = {
+        "short": short, "joined_at_s": joined_at / 1e9, "up": up, "unicast": unicast, "down": down, "late": late,
+        "scan_burst": scan_burst,
+    }
     if up < min_up:
         problems.append(f"device {short:#06x} sent {up} NWK data frames, expected {min_up}")
     if unicast < min_unicast:
@@ -148,6 +166,10 @@ def analyse(
         )
     if down < min_down:
         problems.append(f"coordinator sent {down} NWK data frames to {short:#06x}, expected {min_down}")
+    if scan_burst < min_scan_burst:
+        problems.append(
+            f"the longest scan before the join sent {scan_burst} beacon requests, expected {min_scan_burst}"
+        )
     if late < min_late:
         problems.append(
             f"only {late} uplink data frames after {late_after_ns / 1e9:.0f} s, expected {min_late}"
@@ -168,6 +190,14 @@ def main() -> int:
     ap.add_argument("--min-down", type=int, default=1)
     ap.add_argument("--late-after", type=float, default=0.0, help="virtual seconds")
     ap.add_argument("--min-late", type=int, default=0)
+    ap.add_argument(
+        "--min-scan-burst", type=int, default=0,
+        help="beacon requests in the longest scan before the join (16 = a full 11..26 sweep)",
+    )
+    ap.add_argument(
+        "--scan-burst-gap", type=float, default=0.2,
+        help="virtual seconds: beacon requests closer than this belong to one scan (default 0.2)",
+    )
     ap.add_argument(
         "--expect", action="append", default=[], metavar="REGEX",
         help="regex that must match the console (RTT chunks are re-joined into lines)",
@@ -219,11 +249,14 @@ def main() -> int:
         args.min_down,
         int(args.late_after * 1e9),
         args.min_late,
+        args.min_scan_burst,
+        int(args.scan_burst_gap * 1e9),
     )
     if stats:
         print(
             "zigbee: device {short:#06x} joined at {joined_at_s:.2f} s; "
-            "{up} uplink ({unicast} unicast, {late} late) and {down} downlink NWK data frames".format(**stats)
+            "{up} uplink ({unicast} unicast, {late} late) and {down} downlink NWK data frames; "
+            "longest scan before the join: {scan_burst} beacon requests".format(**stats)
         )
     for p in problems:
         print(f"FAIL: {p}", file=sys.stderr)

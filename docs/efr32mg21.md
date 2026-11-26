@@ -27,45 +27,75 @@ The model has no variants, no `supply_mv`, and a fixed 38.4 MHz clock.
 | GPIO (`0x4003C000`) | Ports A..D: MODEL/MODEH modes (input, pull, push-pull, wired-or/and), DOUT, DIN, EXTI 0..7 (`EXTIPSEL/PINSEL`, rise/fall, IF/IEN) on `GPIO_EVEN`/`GPIO_ODD`. |
 | I2C0 (`0x4A010000`) | Master only, driven through the GPIO routing (`GPIO+0x498` ROUTEEN, `+0x49C` SCLROUTE, `+0x4A0` SDAROUTE; port in bits 1:0, pin in bits 19:16) as an open-drain pair, so a Lua `i2c_slave` on the nets (`examples/parts/cht8305.lua`) sees a real bus. The emlib `I2C_Transfer` register sequence is supported: TXDATA address byte + CMD START, IF.ACK/NACK per byte, RXDATAV with CMD ACK/NACK (or AUTOACK), repeated START, CMD STOP and IF.MSTOP; the bit time follows CLKDIV at 38.4 MHz. Slave mode, clock stretching, arbitration and the bus timeouts are not modelled. INFERRED from emlib and the SDK header (`test_efr32_i2c_master_reads_cht8305` reads a CHT8305 temperature through it); the Tuya ZS3L image has not been seen using I2C0 in the first 120 s after joining. |
 | MSC (`0x40030000`) | Page erase (8 KiB) and word programming (bits can only be cleared) by the register protocol of the zigbee-rs flash driver; instantaneous. |
-| **RADIO** | **Not the silicon.** See below. |
+| **RADIO** | Three register interfaces, chosen by what the firmware does; only one of them follows the silicon's registers. See below. |
 | DPLL0 (`0x4001C000`) | `IF.LOCK` and `STATUS` follow `EN` at once (inferred from `CMU_DPLLLock`, which waits for the lock flag; no frequency model). |
-| USART0 (`0x40058000`, the console) | TXDATA appends each byte to the chip's UART0 output (`run` prints it); STATUS reads TXC, TXBL and TXIDLE as set. |
-| RTCC (`0x48000000` secure, `0x58000000` non-secure) | A 32-bit counter at 32768 Hz divided by `CFG.CNTPRESC` (inferred clock), started by `CMD.START` with `EN`. CC1 in output-compare mode sets `IF.CC1` when the counter reaches `OCVALUE + 1` (inferred from the sleeptimer HAL) and raises IRQ 10. The Zephyr kernel tick runs on it. |
+| USART0 (`0x40058000`, the console) | TXDATA appends each byte to the chip's UART0 output (`run` prints it, `sim` has it as the endpoint `<mcu>.uart0`); STATUS reads TXC, TXBL and TXIDLE as set. Pin routing and the baud rate are not checked. |
+| TIMER0..3 (`0x40048000` + `0x4000` n) | The counter only: `CMD.START`/`STOP` with `EN` set, `STATUS.RUNNING`, `CNT` counting core cycles divided by `CFG.PRESC + 1` up to `TOP`, then wrapping to 0 (TIMER0 32-bit, TIMER1..3 16-bit; `TOP` resets to `0xFFFF` on all four, so a 32-bit TIMER0 count needs `TOP` written, as the zigbee-rs HAL does). It keeps counting while the core sleeps (inferred; no EM2 clock gating). No compare/capture, flags or interrupts. The zigbee-rs HAL's busy-wait clock (`efr32s2-hal` `delay.rs`) runs on TIMER0. |
+| EMU (`0x40004000`) | `RSTCAUSE` (power-on or system-request reset); `TEMP` reads 1193 (quarter kelvin, 25.1 C; a constant, inferred). The rest are stand-ins. |
+| RTCC (`0x48000000` secure, `0x58000000` non-secure) | A 32-bit counter at 32768 Hz divided by `CFG.CNTPRESC` (inferred clock), started by `CMD.START` with `EN`; `STATUS.RUNNING` reads set meanwhile. CC0..CC2 in output-compare mode set `IF.CC0..CC2` (bits 2..4) when the counter reaches `OCVALUE + 1` (inferred from the sleeptimer HAL), the wrap to 0 sets `IF.OF`, and `IF & IEN` raises IRQ 10. The Zephyr kernel tick (CC1) and the zigbee-rs Embassy time driver (CC0, with CC1 for EM2 sleeps) run on it. |
 | SEMAILBOX host (`0x4C000000` secure, `0x5C000000` non-secure) | The mailbox to the Secure Element. The SE is not modelled: every command is answered with SUCCESS and no output data (TX_STATUS.TXINT always set; RX_STATUS.RXINT and RX_HEADER after the words the TX_HEADER announces). Inferred from `sli_se_manager_mailbox.c`. Commands that return data (random numbers, keys, crypto) get no data. |
 | Stand-in storage | Blocks the model does not implement read and write as plain memory: `0x44000000` (secure-only RADIOAES/BUFC/SMU), `0x5A014000` (HFRCOEM23), and, for the RAIL radio init, `0xB0000000` (FRC RAM), `0xB8000000` (PRORTC/radio registers) and `0x54000000` (the non-secure alias of the secure radio blocks). None of them has behaviour. |
-| Everything else | Plain register stand-ins: values read back, no events, no interrupts (EMU, LDMA, TIMER, I2C, IADC, CRYPTO, SE, ...). Firmware that waits for one of them stops at the wait; `--trace-mmio` shows where. |
+| Everything else | Plain register stand-ins: values read back, no events, no interrupts (LDMA beyond the UART receive, I2C slave mode, CRYPTO, ...). Firmware that waits for one of them stops at the wait; `--trace-mmio` shows where. |
 
 ## The radio
 
-The real radio is a sequencer (RAC) running Silicon Labs' RAIL configuration;
-it cannot be driven by a handful of register writes, and mcuemu does not model
-it. What `radio.cpp` implements is the register interface of the zigbee-rs
-`efr32s2` MAC driver (`zigbee-mac/src/efr32s2/driver.rs`), whose own header
-calls it a scaffold with unverified register values: FRC, BUFC, SYNTH, RAC and
-AGC blocks at `0x40090000`, TX and RX FIFOs, RAC commands and status, interrupt
-`FRC_PRI` (IRQ 36), RSSI from the medium. It exists so that firmware can run in
-a network. **Firmware built on RAIL or the GSDK radio stack will not work**, and
-a driver whose register values were fixed to match the silicon would need this
-block changed with it. The register map is in the header comment of
-`emulator/src/efr32/radio.cpp`.
+The real radio is a sequencer (RAC) running Silicon Labs' RAIL configuration and
+microcode; mcuemu does not execute that microcode. Three register interfaces are
+modelled, each for the firmware that uses it:
+
+- **The zigbee-rs `efr32s2-hal` driver** (`efr32s2-hal/src/radio`, the
+  `efr32mg21-sensor` image since zigbee-rs a8710d66d2): `RsmRadio`
+  (`emulator/src/efr32/rsm.cpp`, the register list in `blocks.hpp`). The driver
+  uses the silicon's registers (FRC `0xB8004000`, AGC, SYNTH, RAC `0xB8020000`,
+  BUFC `0x54004000`) and does the sequencer's work on the CPU: it loads its own
+  compact vector table into sequencer RAM, every slot `END` except RXWARM and
+  TXWARM/TXPD, which it parks on a self-`JUMP` while it calibrates the
+  synthesizer by binary search with the LO counter. The model takes the radio
+  over once such a table is loaded, and then holds the RSM (`RAC.STATUS.STATE`)
+  in a state whose slot is a self-jump; it sends BUF0 when TXWARM is released
+  (`FRC.IF.TXDONE` at the end), stores each frame heard while searching in BUF1
+  as `[PHR][PSDU - FCS][RSSI]` (`FRC.IF.RXDONE`; RXOVERFLOW when it does not
+  fit) and reports the channel energy in `AGC.RSSI`. INFERRED: the open-loop VCO
+  curve (2.52 to 2.36 GHz over `VCOTUNING`), a loop that always locks, zero
+  warm-up times (the driver's own waits pace it), the RSSI scale (61 dB above the
+  antenna level, what the driver subtracts) and no `RAC.IF.STATECHANGE`
+  interrupt. ACKs and address filtering are the driver's (software).
+- **RAIL** (Zephyr's RAIL driver, the Silicon Labs EZSP NCP, the Tuya ZS3L image):
+  `RailRegs` plus the RAIL sections of `efr32mg21.cpp`, built from what those
+  images do (see the sections below). It is not the silicon either: the
+  sequencer's effects (RX descriptors in the BUF2 ring, ACKs, PROTIMER events)
+  are produced by the model.
+- **The older zigbee-rs `efr32s2` scaffold** (`zigbee-mac/src/efr32s2/driver.rs`
+  before a8710d66d2, unverified register values): `radio.cpp`, FRC, BUFC,
+  SYNTH, RAC and AGC blocks at `0x40090000`, TX and RX FIFOs, RAC commands and
+  status, interrupt `FRC_PRI` (IRQ 36), RSSI from the medium. The register map
+  is in the header comment of `emulator/src/efr32/radio.cpp`. Current zigbee-rs
+  images no longer use it.
 
 Frames go through the shared `mcuemu::VirtualAir` as 802.15.4 MAC frames
-without the FCS (timed with it, so a frame lasts as long on air as on a real radio). A
-40 us ramp precedes TX and RX; the receiver polls the medium every 16 us and can
-lock on a frame whose start-of-frame delimiter has not passed (128 us), as in
-the nRF52840 model. The radio stays in RX after a frame. All of this timing is
-inferred.
+without the FCS (timed with it, so a frame lasts as long on air as on a real
+radio). The zigbee-rs receivers poll the medium every 16 us and take a frame
+whose start-of-frame delimiter had not passed (128 us) when they started
+listening, as in the nRF52840 model; the RAIL path polls every 100 us. All of
+this timing is inferred.
 
 ## Board: BRD4181A
 
 `examples/devices/efr32mg21_brd4181a.yaml`: LED0 on PB0 (active high), BTN0 on
-PD2 (the WSTK pull-up, low = pressed), RTT on the control block of the image
-(`rtt_address`, `0x20004a18` for the CI image this was developed with; it moves
-with every build). `examples/efr32mg21_zigbee.yaml` puts the board on one medium
-with the TLSR8258 sampleGW coordinator: a button press at 2 s starts the join,
-and the sensor associates, receives the NWK key and completes the trust-center
-link key exchange (about 23 s in, after the first scans find no network yet),
-then reports temperature and humidity (synthetic) from about 83 s.
+PD2 (the WSTK pull-up, low = pressed). The zigbee-rs `efr32mg21-sensor` image
+(an application-slot image linked at `0x4000`, a sleepy end device on the RTCC
+with EM2 between polls) logs through `log` on the WSTK virtual COM port, USART0
+at 115200 8N1 (`src/vcom_log.rs`), so its console is the endpoint
+`board.mcu.uart0`: lines such as `18.251 I [NWK] Joined PAN 0xBF64 ch 15 as
+0xB414`. Older images of the sensor logged over RTT; the current one has no
+`_SEGGER_RTT`. `examples/efr32mg21_zigbee.yaml` puts the board on one medium with
+the TLSR8258 sampleGW coordinator and attaches the console to a `text` sink: a
+button press at 2 s starts the join, the first scans find no network yet, and the
+retry at about 17 s associates, receives the NWK key and completes the
+trust-center link key exchange (about 19 s in, with zigbee-rs 34cafefe and
+`telink-gw.bin`); the sensor then reports the die temperature and a synthetic
+humidity from about 78 s. EM2 is the core's WFI with `SLEEPDEEP`: the model keeps
+every block running, and the RTCC compare wakes it.
 
 ## Silicon Labs EZSP NCP (Sonoff ZBDongle-E image)
 
@@ -150,7 +180,7 @@ overrun and the neighbouring buffer-management data was overwritten. At about 11
 (`buffer-management.c:1345`, a buffer handle outside the pool), reset itself with reason 0x0701 and later sent
 ASH ERROR 0x06. CHDONE is now set only when a descriptor without a valid link ends.
 
-With that fixed the zigbee-rs sensor (`efr32mg21-sensor.bin`) joins the NCP's network end to end:
+With that fixed the zigbee-rs sensor (`efr32mg21-sensor.bin`, then an image with the `0x40090000` scaffold radio driver) joins the NCP's network end to end:
 
     python3 scripts/ncp_host.py join.yaml --root . --for 30s --event "at=8s endpoint=board.key.pressed value=true" \
         --event "at=8.2s endpoint=board.key.pressed value=false"
@@ -239,7 +269,9 @@ confirmed against a schematic).
 ## RAIL registers
 
 The Silicon Labs RAIL library drives the radio through blocks outside the
-zigbee-rs map above. `RailRegs` (`emulator/src/efr32/blocks.cpp`) holds them.
+`0x40090000` scaffold map. `RailRegs` (`emulator/src/efr32/blocks.cpp`) holds them
+(and, as plain storage, the registers of the zigbee-rs `efr32s2-hal` driver, which
+`RsmRadio` gives their behaviour).
 Addresses are the secure view (the non-secure `0xB…` view folds onto `0xA…`):
 
 | Block | Address | Use |
@@ -826,14 +858,15 @@ Sim with the Telink coordinator (30 s, `router-uart.yaml`):
 - `simcore-tests` (`tests/sim/test_efr32.cpp`): pads on nets, config rules.
 - `firmware_efr32mg21_zigbee_join` (image `efr32mg21-sensor.bin` and
   `samplegw_tb03f.bin` in `firmware/`): the two-chip join, TCLK exchange and
-  commit, judged from the RTT log.
+  commit, judged from the sensor's console (`board.mcu.uart0`).
 
 ## Not done
 
 - A radio that matches the silicon (RAIL), BLE.
-- EMU/EM2 sleep, LDMA, TIMER/LETIMER/BURTC, I2C, IADC, CRYPTO/SE (random
-  numbers, AES) and the other stand-ins above. RTCC counts and compares, USART
-  transmits, but neither is an interrupt-accurate model of the silicon.
+- EMU/EM2 sleep (clock gating, retention), LDMA, TIMER compare/capture,
+  LETIMER/BURTC, I2C slave mode, IADC, CRYPTO/SE (random numbers) and the other
+  stand-ins above. RTCC counts and compares, TIMER counts, USART transmits, but
+  none is an interrupt-accurate model of the silicon.
 - Zephyr images with the RAIL radio driver (`IEEE802154_SILABS_EFR32`, board `slwrb4180a`,
   `samples/zigbee/zigbee_shell` as router and as end device, no console) associate with the
   Telink sampleGW coordinator at about 7.7 s of virtual time (checked on the air, with the

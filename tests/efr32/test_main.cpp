@@ -17,6 +17,9 @@ void test_efr32_rail_registers();
 void test_efr32_radioaes();
 void test_efr32_rail_transmit();
 void test_efr32_rail_receive_and_ack();
+void test_efr32_rtcc_cc0_running_and_overflow();
+void test_efr32_timer_counts();
+void test_efr32_rsm_radio();
 } // namespace mcuemu_tests
 
 #define RUN(test)                                                                \
@@ -41,6 +44,9 @@ int main() {
     RUN(test_efr32_radioaes);
     RUN(test_efr32_rail_transmit);
     RUN(test_efr32_rail_receive_and_ack);
+    RUN(test_efr32_rtcc_cc0_running_and_overflow);
+    RUN(test_efr32_timer_counts);
+    RUN(test_efr32_rsm_radio);
     if (failures != 0) {
         std::cerr << failures << " check(s) failed\n";
         return 1;

@@ -5,9 +5,11 @@ TLSR8258 sampleGW coordinator: a Cortex-M33 and a TC32 core on one radio medium.
 A button press at 2 s starts a join; the sensor scans, finds the coordinator's
 beacon on channel 15, associates, receives the NWK key, then completes the
 unique trust-center link key exchange (Request Key, Transport-Key, Verify Key,
-Confirm Key) and commits the network. The radio model is the register
-interface of the zigbee-rs `efr32s2` driver, not the silicon's (see
-docs/efr32mg21.md).
+Confirm Key) and commits the network. The image drives the radio from the CPU
+without RAIL (the zigbee-rs `efr32s2-hal` driver, modelled by RsmRadio, see
+docs/efr32mg21.md) and logs on the virtual COM port (USART0), which the
+example attaches to a text sink: every checked line must come from
+`board.mcu.uart0`.
 """
 
 import os
@@ -46,11 +48,13 @@ def main() -> int:
         pcap = os.path.join(scratch, "efr-air.pcap")
         pcap_size = os.path.getsize(pcap) if os.path.exists(pcap) else 0
 
-    # The RTT text sink breaks lines at arbitrary chunk boundaries; join them.
-    log = re.sub(r"\n?\[\s*[\d.]+ s\] board\.mcu\.rtt: ", "", result.stdout)
+    # The text sink writes one console line per log line: "[ t s] board.mcu.uart0: <line>".
+    log = "\n".join(re.findall(r"^\[\s*[\d.]+ s\] board\.mcu\.uart0: (.*)$", result.stdout, re.MULTILINE))
     for what, pattern in [
-        ("the radio initialised", r"radio initialized in IEEE 802\.15\.4 mode"),
+        ("the boot banner", r"EFR32MG21-Sensor on BRD4181A"),
         ("an active scan that found the coordinator", r"Found 1 network\(s\)"),
+        ("the association", r"Joined PAN 0x[0-9A-F]+ ch 15 as 0x[0-9A-F]+"),
+        ("the NWK key", r"NWK key received from TC"),
         ("the join", r"Joined network as 0x[0-9A-F]+"),
         ("a unique TC link key request", r"Sending APSME-REQUEST-KEY to TC"),
         ("the Transport-Key with the TC link key", r"Transport-Key: TC Link Key from 0x0000"),

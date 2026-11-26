@@ -15,7 +15,8 @@ namespace {
 
 constexpr std::uint32_t RadioBase = 0x40090000, RadioEnd = 0x40096000;
 // Peripheral blocks are 16 KiB apart; slot = (offset from 0x40000000) / 0x4000.
-constexpr unsigned EmuSlot = 1, CmuSlot = 2, HfxoSlot = 3, DpllSlot = 7, UsartSlot = 22, MscSlot = 12, LdmaSlot = 16, GpioSlot = 15;
+constexpr unsigned EmuSlot = 1, CmuSlot = 2, HfxoSlot = 3, DpllSlot = 7, UsartSlot = 22, MscSlot = 12, LdmaSlot = 16, GpioSlot = 15,
+                   Timer0Slot = 18;
 constexpr std::uint32_t RtccBase = 0x48000000, RtccSize = 0x4000;
 constexpr std::uint32_t LpBase = 0x4A000000, LpSize = 0x20000;
 constexpr unsigned ProtimerIrq = 36; // PROTIMER_IRQn
@@ -113,6 +114,8 @@ Efr32mg21::Efr32mg21() {
     blocks_[HfxoSlot] = std::make_unique<Hfxo>(*this, *cmu_);
     blocks_[DpllSlot] = std::make_unique<Dpll>(*this);
     blocks_[UsartSlot] = std::make_unique<Usart>(*this);
+    for (unsigned timer = 0; timer < 4; ++timer)
+        blocks_[Timer0Slot + timer] = std::make_unique<Timer>(*this, timer == 0 ? 0xffffffffu : 0xffffu);
     blocks_[MscSlot] = std::make_unique<Msc>(*this);
     auto ldma = std::make_unique<Ldma>(*this);
     ldma_ = ldma.get();
@@ -121,6 +124,7 @@ Efr32mg21::Efr32mg21() {
     gpio_ = gpio.get();
     blocks_[GpioSlot] = std::move(gpio);
     radio_ = std::make_unique<Radio>(*this);
+    rsm_ = std::make_unique<RsmRadio>(*this, *rail_regs_, *radio_);
     rtcc_ = std::make_unique<Rtcc>(*this);
     se_mailbox_ = std::make_unique<SeMailbox>(*this);
 
@@ -234,6 +238,7 @@ void Efr32mg21::reset() {
     rtcc_->reset();
     se_mailbox_->reset();
     rail_regs_->reset();
+    rsm_->reset();
     tx_done_at_ = ack_timeout_at_ = lbt_tx_at_ = pending_ack_at_ = pending_rx_at_ = NoEvent;
     // short_address_known_ is deliberately kept: the driver's short address and PAN live in RAIL's
     // RAM handle, which the model does not read, so the copy learned from the association response
@@ -521,6 +526,11 @@ std::uint64_t Efr32mg21::service(std::uint64_t now) {
         core_->set_irq_line(ProtimerIrq, (rail_regs_->peek(ProtimerIf) & enabled) != 0);
         next_protimer_ = std::max(next, now + 1);
     }
+    if (rsm_->active()) {
+        const std::uint64_t radio_next = rsm_->service(now);
+        return std::min({radio_->service(now), rtcc_->service(now), i2c_ ? i2c_->service(now) : NoEvent, next_protimer_,
+                         radio_next});
+    }
     // The end of the frame sets FRC TX_PACKET_SENT; the ACK wait then runs out
     // unless an ACK arrives, which the RAIL model does not receive from the air.
     // The data request event is handled when the firmware clears RAC IF bit 19; the ACK and the packet wait for
@@ -648,7 +658,8 @@ std::uint32_t Efr32mg21::read(std::uint32_t address, unsigned size) {
         const std::uint64_t divisor = static_cast<std::uint64_t>(rail_regs_->peek(ProtimerPrecntTop)) + 0x100u;
         value = static_cast<std::uint32_t>(core_->cycles() * 256u / divisor); // the same count service() compares against
     } else if (is_rail_register(address)) {
-        value = rail_regs_->read(address);
+        if (!rsm_->read(address, value))
+            value = rsm_->active() ? rail_regs_->stored(address) : rail_regs_->read(address);
     } else {
         const std::uint32_t offset = address - PeripheralBase;
         value = block_at(offset >> 14).read(offset & 0xffc);
@@ -696,8 +707,13 @@ void Efr32mg21::write(std::uint32_t address, std::uint32_t value, unsigned size)
         if (address == Buf0Cmd && (value & 1u))
             rail_regs_->write(Buf0WriteOffset, 0); // CMD.CLEAR empties the buffer
         rail_regs_->write(address, value, size);
+        rsm_->written(address, value);
         if (address == RadioAesCmd && (value & 3u))
             run_radioaes();
+        if (rsm_->active()) {
+            rail_regs_->take_tx_start(); // RsmRadio starts the frame when TXWARM is released
+            return;
+        }
         if (rail_regs_->take_tx_start())
             start_tx();
         // INFERRED: PROTIMER CMD bit 16 starts the hardware listen-before-talk that RAIL's CSMA

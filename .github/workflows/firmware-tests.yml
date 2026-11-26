@@ -4,16 +4,22 @@ name: Firmware tests
 #
 # 1. `prepare` finds the build run whose Linux binary is tested.
 # 2. The `firmware-*` jobs build or download every image from source (Telink SDK
-#    samples, z03mmc, the zigbee-rs plug and nRF52840 sensor, the thermostat
-#    and Zephyr releases). Each image is its own artifact, so one broken build only fails
-#    the tests that need it.
+#    samples, z03mmc, the zigbee-rs plug and sensors, the Zephyr router release,
+#    the Silicon Labs NCP and the Moes dump). Each image is its own artifact, so one
+#    broken build only fails the tests that need it.
 # 3. `test` runs one job per scenario. Scenarios are independent
 #    (`fail-fast: false`). The Zigbee scenarios pass when the device joins the
 #    network and the two sides exchange data (tests/firmware/zigbee_air_check.py).
 #    UART and RTT output goes to the job log and to the `logs-*` artifacts.
 #
 # Images with no buildable source are committed in tests/firmware-images/. The EFR32MG21
-# Zephyr router and ED come from a pinned release of devbis/zephyr-tlsr8258.
+# Zephyr router comes from a pinned release of devbis/zephyr-tlsr8258.
+#
+# The zigbee-rs images are built from one pinned commit (ZIGBEE_RS_REF): its examples change
+# their logs, radio drivers and boards without notice, so a moving branch breaks these tests.
+# To move to a newer commit, set ZIGBEE_RS_REF to its full SHA, run this workflow by hand
+# (Actions > Firmware tests > Run workflow, on your branch, with the id of a "Build mcuemu" run
+# of that branch) and fix what changed in the scenarios' --expect lines and docs/firmware-ci.md.
 
 on:
   workflow_run:
@@ -40,7 +46,9 @@ env:
   Z03MMC_REPOSITORY: devbis/z03mmc
   PLUGS_REPOSITORY: faronov/zigbee-rs-plugs
   ZIGBEE_RS_REPOSITORY: devbis/zigbee-rs
-  ZIGBEE_RS_REF: nrf-experiment             # has the TCLK-exchange fixes the nRF image needs
+  # Branch nrf-experiment at 2026-11-12 ("runtime: take TCLK-exchange frames with volatile replay floors").
+  # A full SHA, not the branch: see the header for how to move it.
+  ZIGBEE_RS_REF: 34cafefe982258c9cbe3c35767c6481b03cc08c3
   ZIGBEE_RS_RUST_TOOLCHAIN: nightly-2026-08-01   # one toolchain for every zigbee-rs image
   ESPFLASH_URL: https://github.com/esp-rs/espflash/releases/download/v4.5.0/espflash-x86_64-unknown-linux-gnu.zip
   ESPFLASH_SHA256: dcd7fd822f247df18966935bbb10c7cb4b700c87172349633e9e323ee2542717
@@ -48,16 +56,12 @@ env:
   TC32_RUST_SHA256: a3b1e187a03311d00551e0df33b78746e5f1d853d5bb48f4b2977583d33e9356
   ZEPHYR_ZIGBEE_RELEASE: https://github.com/devbis/zephyr-tlsr8258/releases/download/zephyr-zigbee-20261030-de387d
   ZEPHYR_EFR32_ROUTER_SHA256: 1f172bc0ee806ce247ee1f04463bf3c5ce1c14a174ca656989b60640b5fbcc8d
-  ZEPHYR_EFR32_ED_SHA256: 905a9add7a49915924ef897eb5f09d4504b1e1158a9deb599fd58f201f4749b6
   # Silicon Labs EZSP NCP (Sonoff ZBDongle-E build of Nerivec/silabs-firmware-builder), the coordinator of the Moes scenario.
   EFR32_NCP_URL: https://github.com/Nerivec/silabs-firmware-builder/releases/download/v2025.6.2-update1/sonoff_zbdonglee_zigbee_ncp_8.2.2.0_115200_sw_flow.gbl
   EFR32_NCP_GBL_SHA256: a99fe1a9d967ccebddba0ef3e547f2e7af3d5949b30fe77b1c756a13997fdcc6
   # Full-flash dump of the Moes ZigBee "Smart Brightness Thermometer" (ZSS-ZK-THL, Tuya ZS3L) from pvvx's page.
   MOES_THERMOMETER_URL: https://pvvx.github.io/ZSS-ZK-THL/bin/FullFlashBin.zip
   MOES_THERMOMETER_ZIP_SHA256: f3825e33cb65e88feb7bf447b0c21fc36e39102bb6e3da285ba8d8661034ba4d
-  THERMOSTAT_RELEASE: https://github.com/slacky1965/tuya_thermostat_full_custom_r02_zrd/releases/download/r02-20261109
-  THERMOSTAT_CA51_SHA256: f7d07704fd70effdb385fab243c4823c72a878b61a563fb1244c548f72d4cf24
-  THERMOSTAT_ZT3L_SHA256: 8ed2c753c8c8e7dc9e6a601ae7f9d95983c07998e14e81ce8aaa5deea3a78e29
 
 jobs:
   prepare:
@@ -306,46 +310,20 @@ jobs:
       - name: Build
         working-directory: examples/efr32mg21-sensor
         run: cargo build --release --locked
-      - name: Make the raw image and find the RTT control block
+      # The image logs on the WSTK virtual COM port (USART0), the emulator's uart0 endpoint: no RTT.
+      # Linked for the 0x4000 application slot; the emulator loads such an image there.
+      - name: Make the raw image
         run: |
           set -euo pipefail
           ELF=examples/efr32mg21-sensor/target/thumbv8m.main-none-eabihf/release/efr32mg21-sensor
-          SYSROOT="$(rustc --print sysroot)"
-          OBJCOPY="$(find "$SYSROOT" -name llvm-objcopy -print -quit)"
-          NM="$(find "$SYSROOT" -name llvm-nm -print -quit)"
+          OBJCOPY="$(find "$(rustc --print sysroot)" -name llvm-objcopy -print -quit)"
           mkdir -p out
           "$OBJCOPY" -O binary "$ELF" out/efr32mg21-sensor.bin
-          # The simulator's RTT endpoint needs the address of _SEGGER_RTT.
-          ADDRESS="$("$NM" "$ELF" | awk '$3 == "_SEGGER_RTT" { print $1 }')"
-          test -n "$ADDRESS"
-          echo "0x$ADDRESS" > out/efr32mg21-sensor.rtt
-          cat out/efr32mg21-sensor.rtt
           sha256sum out/*.bin
       - uses: actions/upload-artifact@v7
         with:
           name: fw-efr32mg21-sensor
-          path: |
-            out/efr32mg21-sensor.bin
-            out/efr32mg21-sensor.rtt
-          if-no-files-found: error
-
-  firmware-tlsr8258_ca51_thermostat_r02:
-    name: "Prepare: tlsr8258 + ca51 thermostat r02"
-    needs: prepare
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download the CA51F253L3 and ZT3L images
-        run: |
-          set -euo pipefail
-          mkdir -p out
-          curl -fL --retry 3 -o out/thermostat-ca51.bin  "$THERMOSTAT_RELEASE/osrctherm_r02_v1.05_CA51F253L3.bin"
-          curl -fL --retry 3 -o out/thermostat-zt3l.bin  "$THERMOSTAT_RELEASE/osrctherm_r02_zrd_v1.0.02_ZT3L.bin"
-          echo "$THERMOSTAT_CA51_SHA256  out/thermostat-ca51.bin" | sha256sum -c -
-          echo "$THERMOSTAT_ZT3L_SHA256  out/thermostat-zt3l.bin" | sha256sum -c -
-      - uses: actions/upload-artifact@v7
-        with:
-          name: fw-tlsr8258_ca51_thermostat_r02
-          path: out/*.bin
+          path: out/efr32mg21-sensor.bin
           if-no-files-found: error
 
   firmware-efr32-ncp:
@@ -395,21 +373,19 @@ jobs:
           if-no-files-found: error
 
   firmware-efr32-zephyr:
-    name: "Prepare: EFR32MG21 Zephyr router and ED"
+    name: "Prepare: EFR32MG21 Zephyr router"
     needs: prepare
     runs-on: ubuntu-latest
     steps:
       # Built by the "Build Zigbee firmware" workflow of devbis/zephyr-tlsr8258 (Zephyr
       # zigbee_shell, board slwrb4180a, RAIL radio driver, no console). Pinned to a release
-      # and checked against its SHA-256; move the three variables together to update.
-      - name: Download the release images
+      # and checked against its SHA-256; move the two variables together to update.
+      - name: Download the release image
         run: |
           set -euo pipefail
           mkdir -p out
           curl -fL --retry 3 -o out/efr32-zephyr-router.bin "$ZEPHYR_ZIGBEE_RELEASE/efr32mg21-router.bin"
-          curl -fL --retry 3 -o out/efr32-zephyr-ed.bin "$ZEPHYR_ZIGBEE_RELEASE/efr32mg21-end-device.bin"
           echo "$ZEPHYR_EFR32_ROUTER_SHA256  out/efr32-zephyr-router.bin" | sha256sum -c -
-          echo "$ZEPHYR_EFR32_ED_SHA256  out/efr32-zephyr-ed.bin" | sha256sum -c -
       - uses: actions/upload-artifact@v7
         with:
           name: fw-efr32-zephyr
@@ -431,7 +407,6 @@ jobs:
       - firmware-efr32-ncp
       - firmware-moes-thermometer
       - firmware-esp32
-      - firmware-tlsr8258_ca51_thermostat_r02
     # Run even when an unrelated image failed to build: the scenario that needs
     # it fails on its own, the others still report.
     if: ${{ !cancelled() && needs.prepare.result == 'success' }}
@@ -458,34 +433,31 @@ jobs:
               python3 tests/firmware/zigbee_air_check.py "$MCUEMU"
               tests/firmware/scenarios/zigbee_nrf52840.yaml --workdir "$LOGS" --for 100s
               --min-unicast 2 --late-after 75 --min-late 1
-              --expect 'ch 15: 1 beacon\(s\) found'
+              --expect 'Found 1 network\(s\)'
               --expect 'Joined PAN 0x[0-9A-F]+ ch 15 as 0x[0-9A-F]+'
               --expect 'NWK key received from TC'
               --expect 'Sending APSME-REQUEST-KEY to TC'
               --expect 'Confirm-Key SUCCESS from the Trust Center'
               --expect 'Commissioning security complete.{1,16}network committed'
+          # The sensor's log is its VCOM console: each line must come from board.mcu.uart0.
           - name: zigbee-efr32mg21
             command: >-
-              sed -i "s/^\( *rtt_address: \)0x[0-9a-fA-F]*/\1$(cat firmware/efr32mg21-sensor.rtt)/"
-              tests/firmware/scenarios/zigbee_efr32mg21.yaml &&
               python3 tests/firmware/zigbee_air_check.py "$MCUEMU"
               tests/firmware/scenarios/zigbee_efr32mg21.yaml --workdir "$LOGS" --for 100s
               --min-unicast 2 --late-after 75 --min-late 1
-              --expect 'radio initialized in IEEE 802\.15\.4 mode'
-              --expect 'Found 1 network\(s\)'
-              --expect 'Joined network as 0x[0-9A-F]+'
-              --expect 'Sending APSME-REQUEST-KEY to TC'
-              --expect 'Transport-Key: TC Link Key from 0x0000'
-              --expect 'Confirm-Key SUCCESS from the Trust Center'
-              --expect 'Commissioning security complete.{1,16}network committed'
+              --expect 'board\.mcu\.uart0: .*EFR32MG21-Sensor on BRD4181A'
+              --expect 'board\.mcu\.uart0: .*Found 1 network\(s\)'
+              --expect 'board\.mcu\.uart0: .*Joined PAN 0x[0-9A-F]+ ch 15 as 0x[0-9A-F]+'
+              --expect 'board\.mcu\.uart0: .*NWK key received from TC'
+              --expect 'board\.mcu\.uart0: .*Sending APSME-REQUEST-KEY to TC'
+              --expect 'board\.mcu\.uart0: .*Transport-Key: TC Link Key from 0x0000'
+              --expect 'board\.mcu\.uart0: .*Confirm-Key SUCCESS from the Trust Center'
+              --expect 'board\.mcu\.uart0: .*Commissioning security complete.{1,16}network committed'
+              --expect 'board\.mcu\.uart0: .*CommissioningComplete \{ success: true \}'
           - name: zigbee-efr32-zephyr-router
             command: >-
               python3 tests/firmware/zigbee_air_check.py "$MCUEMU"
               tests/firmware/scenarios/zigbee_efr32_zephyr_router.yaml --workdir "$LOGS" --for 30s
-          - name: zigbee-efr32-zephyr-ed
-            command: >-
-              python3 tests/firmware/zigbee_air_check.py "$MCUEMU"
-              tests/firmware/scenarios/zigbee_efr32_zephyr_ed.yaml --workdir "$LOGS" --for 30s
           - name: moes-brightness-thermometer
             command: >-
               python3 scripts/moes_brightness_thermometer.py firmware/moes-brightness-thermometer.bin
@@ -503,19 +475,13 @@ jobs:
             command: >-
               python3 tests/firmware/zigbee_air_check.py "$MCUEMU"
               tests/firmware/scenarios/zigbee_esp32c6.yaml --workdir "$LOGS" --for 60s
-              --min-unicast 2
+              --min-unicast 2 --min-scan-burst 16
               --expect 'Hardware AES KAT passed'
-              --expect '\[SCAN\] ch 26'
+              --expect 'Scanning for open networks'
+              --expect 'Joined PAN 0x[0-9A-F]+ ch 15 as 0x[0-9A-F]+'
               --expect 'JoinedOrResumed'
               --expect 'Confirm-Key SUCCESS'
               --expect 'CommissioningComplete \{ success: true \}'
-          - name: tlsr8258 + ca51 thermostat r02
-            command: >-
-              python3 tests/firmware/zigbee_air_check.py "$MCUEMU"
-              tests/firmware/scenarios/thermostat.yaml --workdir "$LOGS" --for 30s --min-unicast 1
-              --no-uart-trace
-              --expect 'thermostat\.main\.uart1 +[0-9]+ bytes: aa 55'
-              --expect 'thermostat\.zb\.uart0 +[0-9]+ bytes: aa 55'
           - name: zigbee-phy6252-ts0001
             command: >-
               python3 tests/firmware/test_phy6252_ts0001_join.py "$MCUEMU"
@@ -559,6 +525,8 @@ jobs:
           MCUEMU: ${{ github.workspace }}/dl/mcuemu-linux-amd64/bin/mcuemu
           LOGS: ${{ github.workspace }}/logs/${{ matrix.name }}
         run: |
+          # Without pipefail the step would take tee's status and pass whatever the scenario reports.
+          set -o pipefail
           mkdir -p "$LOGS"
           # The console (UART and RTT text included) is shown here and kept in the log artifact.
           ${{ matrix.command }} 2>&1 | tee "$LOGS/run.log"

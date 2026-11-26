@@ -50,7 +50,7 @@ def main() -> int:
     # The RTT text sink breaks lines at arbitrary chunk boundaries; join them.
     log = re.sub(r"\n?\[\s*[\d.]+ s\] board\.mcu\.rtt: ", "", result.stdout)
     for what, pattern in [
-        ("an active scan that found the coordinator's beacon", r"ch 15: 1 beacon\(s\) found"),
+        ("an active scan that found the coordinator's beacon", r"Found 1 network\(s\)"),
         ("the join request", r"Joining PAN 0x[0-9A-F]+ ch 15"),
         ("association (the coordinator's ACK reached the radio)", r"Joined PAN 0x[0-9A-F]+ ch 15 as 0x[0-9A-F]+"),
         ("the Transport-Key", r"NWK key received from TC"),

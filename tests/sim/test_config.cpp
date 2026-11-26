@@ -197,7 +197,7 @@ void test_system_build_errors() {
         "      - {id: m, model: tlsr8258, firmware: IMG}\n";
     CHECK(contains(build("version: 1\ndevices:\n  - id: d\n    mcus:\n"
                          "      - {id: m, model: nope, firmware: IMG}\n"),
-                   "unknown mcu model 'nope' (known: bl702, ca51f253l3, cc2530f256, efr32mg21, esp32c6, esp32h2, nrf52840, phy6252, tlsr8258, tlsr8267, tlsr8269)"));
+                   "unknown mcu model 'nope' (known: bl702, ca51f253l3, cc2530f256, efr32mg21, esp32c6, esp32h2, nrf52840, phy6252, stm32wb55, tlsr8258, tlsr8267, tlsr8269)"));
     CHECK(contains(build("version: 1\ndevices:\n  - id: d\n    mcus:\n"
                          "      - {id: m, model: tlsr8258, firmware: /no/such.bin}\n"),
                    "cannot open firmware image"));
