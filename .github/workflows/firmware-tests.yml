@@ -2,7 +2,10 @@ name: Firmware tests
 
 # Runs real firmware images on the emulator built by "Build mcuemu".
 #
-# 1. `prepare` finds the build run whose Linux binary is tested.
+# 1. `gate` finds the build run whose Linux binary is tested and checks that its linux-amd64
+#    job succeeded and left the mcuemu-linux-amd64 artifact; the other platform jobs of that
+#    run (a macOS arm64 runner that never comes, Windows) do not matter. `prepare` runs only
+#    then, and everything else needs `prepare`.
 # 2. The `firmware-*` jobs build or download every image from source (Telink SDK
 #    samples, z03mmc, the zigbee-rs plug and sensors, the Zephyr router release,
 #    the Silicon Labs NCP and the Moes dump). Each image is its own artifact, so one
@@ -28,7 +31,7 @@ on:
   workflow_dispatch:
     inputs:
       run_id:
-        description: "Build mcuemu run to test (empty: the latest successful run on main)"
+        description: "Build mcuemu run to test (empty: the latest run on main whose linux-amd64 job succeeded)"
         required: false
         type: string
 
@@ -45,6 +48,9 @@ env:
   TC32_GCC_REPOSITORY: devbis/tc32          # branch `linux`, as in the z03mmc workflow
   Z03MMC_REPOSITORY: devbis/z03mmc
   PLUGS_REPOSITORY: faronov/zigbee-rs-plugs
+  # What this workflow takes from a "Build mcuemu" run: its Linux job and that job's artifact.
+  BUILD_LINUX_JOB: linux-amd64
+  BUILD_LINUX_ARTIFACT: mcuemu-linux-amd64
   ZIGBEE_RS_REPOSITORY: devbis/zigbee-rs
   # Branch nrf-experiment at 2026-11-12 ("runtime: take TCLK-exchange frames with volatile replay floors").
   # A full SHA, not the branch: see the header for how to move it.
@@ -64,30 +70,93 @@ env:
   MOES_THERMOMETER_ZIP_SHA256: f3825e33cb65e88feb7bf447b0c21fc36e39102bb6e3da285ba8d8661034ba4d
 
 jobs:
-  prepare:
+  # Runs for every completed build, whatever its conclusion: a build is usable when its linux-amd64
+  # job succeeded and the artifact is there. A workflow_run build that is not usable is skipped with a
+  # notice; a run_id given by hand that is not usable fails.
+  gate:
     name: Find the emulator build
-    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     outputs:
+      proceed: ${{ steps.run.outputs.proceed }}
       run_id: ${{ steps.run.outputs.run_id }}
       sha: ${{ steps.run.outputs.sha }}
     steps:
       - id: run
         env:
           GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
           EVENT_RUN_ID: ${{ github.event.workflow_run.id }}
           INPUT_RUN_ID: ${{ inputs.run_id }}
         run: |
           set -euo pipefail
+          # Succeeds when build run $1 has a successful $BUILD_LINUX_JOB job (latest attempt) and an
+          # unexpired $BUILD_LINUX_ARTIFACT; otherwise prints why.
+          usable() {
+            local conclusion artifacts
+            conclusion="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$1/jobs?per_page=100" --paginate \
+              --jq ".jobs[] | select(.name == \"$BUILD_LINUX_JOB\") | .conclusion // .status")"
+            if [ "$conclusion" != success ]; then
+              echo "build run $1: job $BUILD_LINUX_JOB is '${conclusion:-missing}'"
+              return 1
+            fi
+            artifacts="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$1/artifacts?name=$BUILD_LINUX_ARTIFACT" \
+              --jq '[.artifacts[] | select(.expired | not)] | length')"
+            if [ "$artifacts" = 0 ]; then
+              echo "build run $1: no unexpired artifact $BUILD_LINUX_ARTIFACT"
+              return 1
+            fi
+          }
+          proceed=false
           run_id="${EVENT_RUN_ID:-$INPUT_RUN_ID}"
-          if [ -z "$run_id" ]; then
-            run_id="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow build.yml --branch main \
-              --status success --limit 1 --json databaseId --jq '.[0].databaseId')"
+          if [ "$EVENT_NAME" = workflow_run ]; then
+            if reason="$(usable "$run_id")"; then
+              proceed=true
+            else
+              echo "::notice::Firmware tests skipped: $reason"
+              echo "Skipped: $reason" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          elif [ -n "$run_id" ]; then
+            if ! reason="$(usable "$run_id")"; then
+              echo "::error::$reason"
+              exit 1
+            fi
+            proceed=true
+          else
+            # The most recent build on main with a usable Linux job, whatever happened to the other platforms.
+            for candidate in $(gh run list --repo "$GITHUB_REPOSITORY" --workflow build.yml --branch main \
+                --limit 20 --json databaseId --jq '.[].databaseId'); do
+              if usable "$candidate"; then
+                run_id="$candidate"
+                proceed=true
+                break
+              fi
+            done
+            if [ "$proceed" != true ]; then
+              echo "::error::none of the last 20 Build mcuemu runs on main has a successful $BUILD_LINUX_JOB job and its artifact"
+              exit 1
+            fi
           fi
-          sha="$(gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --json headSha --jq .headSha)"
-          echo "Testing build run $run_id at $sha" >> "$GITHUB_STEP_SUMMARY"
-          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "proceed=$proceed" >> "$GITHUB_OUTPUT"
+          if [ "$proceed" = true ]; then
+            sha="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" --jq .head_sha)"
+            echo "Testing build run $run_id at $sha ($BUILD_LINUX_JOB succeeded)" >> "$GITHUB_STEP_SUMMARY"
+            echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+            echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          fi
+
+  prepare:
+    name: "Test build run ${{ needs.gate.outputs.run_id }}"
+    needs: gate
+    if: ${{ needs.gate.outputs.proceed == 'true' }}
+    runs-on: ubuntu-latest
+    outputs:
+      run_id: ${{ needs.gate.outputs.run_id }}
+      sha: ${{ needs.gate.outputs.sha }}
+    steps:
+      - env:
+          RUN_ID: ${{ needs.gate.outputs.run_id }}
+          SHA: ${{ needs.gate.outputs.sha }}
+        run: echo "Build run $RUN_ID at $SHA"
 
   # ------------------------------------------------------------------ images
 

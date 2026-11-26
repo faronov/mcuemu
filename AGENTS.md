@@ -107,8 +107,9 @@ ctest --test-dir build --output-on-failure
   run the two-chip networks in about 15 s each. **Run them after any
   change to CPU execution, timing or peripherals**: they are the only check that
   catches subtle timing regressions across nodes.
-- **CI firmware tests** (`.github/workflows/firmware-tests.yml`, runs after
-  "Build mcuemu" succeeds, Ubuntu): every image is built from source or
+- **CI firmware tests** (`.github/workflows/firmware-tests.yml`, runs after a
+  "Build mcuemu" run whose `linux-amd64` job succeeded, whatever the other
+  platforms did; Ubuntu): every image is built from source or
   downloaded, then one job per scenario runs the emulator; scenarios do not
   block each other. Details and the policy for new images are in
   `docs/firmware-ci.md`. Prefer building from source; commit an image to
