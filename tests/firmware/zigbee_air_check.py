@@ -10,8 +10,11 @@ goes over the air (a pcap written by a `pcap:` sink, link type 230, IEEE
 * after that the new device sends NWK data frames (--min-up; --min-unicast asks
   for frames addressed to a node, not broadcasts such as Device Announce) and the
   coordinator sends NWK data frames to it (the key, the interview, ...);
-* optionally, more unicast uplink frames after a given virtual time (periodic reports)
-  and regexes that must appear in the console (--expect, e.g. the RTT log).
+* optionally, more unicast uplink frames after a given virtual time (periodic reports),
+  a number of MAC beacon requests before the join (--min-beacon-requests: 16 is one
+  per channel of a full 11..26 scan; the capture has no channel field, so this is
+  a count, not a channel list) and regexes that must appear in the console
+  (--expect, e.g. the RTT log).
 
 UART and RTT output goes to the console through the system file's own sinks
 (`--trace-uart '*=text'` is added unless --no-uart-trace is given); the whole
@@ -112,6 +115,7 @@ def analyse(
     min_down: int,
     late_after_ns: int,
     min_late: int,
+    min_beacon_requests: int = 0,
 ):
     problems: list[str] = []
     joined_at = short = None
@@ -123,6 +127,10 @@ def analyse(
                 break
     if short is None:
         return ["no successful association response in the capture"], {}
+    # MAC command 0x07 (beacon request) before the association response.
+    beacon_requests = sum(
+        1 for f in frames if f.t_ns < joined_at and f.kind == 3 and f.payload[:1] == b"\x07"
+    )
     up = unicast = down = late = 0
     for f in frames:
         if f.t_ns < joined_at:
@@ -139,7 +147,10 @@ def analyse(
                     late += 1
         if dst == short and src == 0:
             down += 1
-    stats = {"short": short, "joined_at_s": joined_at / 1e9, "up": up, "unicast": unicast, "down": down, "late": late}
+    stats = {
+        "short": short, "joined_at_s": joined_at / 1e9, "up": up, "unicast": unicast, "down": down, "late": late,
+        "beacon_requests": beacon_requests,
+    }
     if up < min_up:
         problems.append(f"device {short:#06x} sent {up} NWK data frames, expected {min_up}")
     if unicast < min_unicast:
@@ -148,6 +159,10 @@ def analyse(
         )
     if down < min_down:
         problems.append(f"coordinator sent {down} NWK data frames to {short:#06x}, expected {min_down}")
+    if beacon_requests < min_beacon_requests:
+        problems.append(
+            f"{beacon_requests} beacon requests before the join, expected {min_beacon_requests}"
+        )
     if late < min_late:
         problems.append(
             f"only {late} uplink data frames after {late_after_ns / 1e9:.0f} s, expected {min_late}"
@@ -168,6 +183,10 @@ def main() -> int:
     ap.add_argument("--min-down", type=int, default=1)
     ap.add_argument("--late-after", type=float, default=0.0, help="virtual seconds")
     ap.add_argument("--min-late", type=int, default=0)
+    ap.add_argument(
+        "--min-beacon-requests", type=int, default=0,
+        help="MAC beacon requests before the association response (16 = a full 11..26 scan)",
+    )
     ap.add_argument(
         "--expect", action="append", default=[], metavar="REGEX",
         help="regex that must match the console (RTT chunks are re-joined into lines)",
@@ -219,11 +238,13 @@ def main() -> int:
         args.min_down,
         int(args.late_after * 1e9),
         args.min_late,
+        args.min_beacon_requests,
     )
     if stats:
         print(
             "zigbee: device {short:#06x} joined at {joined_at_s:.2f} s; "
-            "{up} uplink ({unicast} unicast, {late} late) and {down} downlink NWK data frames".format(**stats)
+            "{up} uplink ({unicast} unicast, {late} late) and {down} downlink NWK data frames; "
+            "{beacon_requests} beacon requests before".format(**stats)
         )
     for p in problems:
         print(f"FAIL: {p}", file=sys.stderr)

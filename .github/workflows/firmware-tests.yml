@@ -475,7 +475,7 @@ jobs:
             command: >-
               python3 tests/firmware/zigbee_air_check.py "$MCUEMU"
               tests/firmware/scenarios/zigbee_esp32c6.yaml --workdir "$LOGS" --for 60s
-              --min-unicast 2
+              --min-unicast 2 --min-beacon-requests 16
               --expect 'Hardware AES KAT passed'
               --expect 'Scanning for open networks'
               --expect 'Joined PAN 0x[0-9A-F]+ ch 15 as 0x[0-9A-F]+'
